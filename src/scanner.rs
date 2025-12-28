@@ -28,7 +28,7 @@ pub enum Token {
 }
 
 #[allow(unused)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lexeme {
     pub ty: Token,
     pub line_n: usize,

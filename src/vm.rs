@@ -1,5 +1,4 @@
 use miette::Result;
-use rustc_hash::FxHashMap;
 use std::{borrow::Cow, fmt::Debug};
 
 use crate::{
@@ -8,7 +7,7 @@ use crate::{
     interner::Interner,
 };
 
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types, unused)]
 #[derive(Debug, Clone, Copy)]
 pub enum OpCode {
     OP_RETURN,
@@ -34,6 +33,9 @@ pub enum OpCode {
     OP_DEFINE_GLOBAL(usize),
     OP_SET_GLOBAL(usize),
     OP_GET_GLOBAL(usize),
+
+    OP_SET_LOCAL(usize),
+    OP_GET_LOCAL(usize),
 }
 
 impl OpCode {
@@ -101,7 +103,6 @@ pub struct VM {
     instructions: Vec<OpCode>,
     values: Vec<Value>,
     // <Interned name: Valuees id>
-    globals: FxHashMap<usize, Value>,
     lines: Vec<LineInfo>,
 }
 
@@ -115,7 +116,6 @@ impl VM {
             stack: Vec::with_capacity(256),
             values: Vec::new(),
             lines: Vec::new(),
-            globals: FxHashMap::default(),
         }
     }
 
@@ -224,11 +224,11 @@ impl VM {
                 }
                 OP_DEFINE_GLOBAL(v) => {
                     let value = self.stack.pop().unwrap();
-                    self.globals.insert(v, value);
+                    self.arena.globals.insert(v, value);
                 }
                 OP_GET_GLOBAL(v) => {
                     self.stack
-                        .push(*self.globals.get(&v).ok_or_else(|| RuntimeError {
+                        .push(*self.arena.globals.get(&v).ok_or_else(|| RuntimeError {
                             advice: format!(
                                 "undefined variable \"{}\" referenced on line {}.",
                                 interner.resolve(v),
@@ -238,7 +238,7 @@ impl VM {
                 }
                 OP_SET_GLOBAL(v) => {
                     let value = self.stack.pop().unwrap();
-                    let key = self.globals.get_mut(&v);
+                    let key = self.arena.globals.get_mut(&v);
 
                     let Some(key) = key else {
                         return Err(RuntimeError {
@@ -253,6 +253,9 @@ impl VM {
 
                     *key = value
                 }
+
+                OP_SET_LOCAL(slot) => self.stack[slot] = *self.stack.last().unwrap(),
+                OP_GET_LOCAL(slot) => self.stack.push(self.stack[slot]),
             }
         }
 

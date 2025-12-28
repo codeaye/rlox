@@ -1,3 +1,5 @@
+use std::num::{NonZero, NonZeroUsize};
+
 use miette::Result;
 
 use crate::{
@@ -75,12 +77,22 @@ fn parse_token_to_rule(token: &Token) -> ParseRule {
     }
 }
 
+#[derive(Debug)]
+struct Local {
+    name: usize,
+    depth: Option<NonZeroUsize>,
+}
+
 pub struct Compiler<'a> {
     source: &'a str,
     input: &'a [Lexeme],
     vm: &'a mut VM,
     interner: &'a mut Interner,
     current: usize,
+
+    locals: Vec<Local>,
+    local_count: usize,
+    scope_depth: usize,
 }
 
 impl<'a> Compiler<'a> {
@@ -96,6 +108,9 @@ impl<'a> Compiler<'a> {
             vm,
             interner,
             current: 0,
+            locals: Vec::new(),
+            local_count: 0,
+            scope_depth: 0,
         }
     }
 
@@ -113,7 +128,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile(&mut self) -> Result<()> {
-        while self.input[self.current].ty != Token::EOF {
+        while !self.check(Token::EOF) {
             self.declaration()?;
         }
 
@@ -144,8 +159,23 @@ impl<'a> Compiler<'a> {
                 self.advance()?;
                 self.print_stmt()
             }
+            Token::LEFT_BRACE => {
+                self.advance()?;
+                self.begin_scope();
+                self.block()?;
+                self.end_scope();
+                Ok(())
+            }
             _ => self.expression_stmt(),
         }
+    }
+
+    fn block(&mut self) -> Result<()> {
+        while !self.check(Token::RIGHT_BRACE) && !self.check(Token::EOF) {
+            self.declaration()?;
+        }
+        self.consume(Token::RIGHT_BRACE)?;
+        Ok(())
     }
 
     fn print_stmt(&mut self) -> Result<()> {
@@ -175,7 +205,12 @@ impl<'a> Compiler<'a> {
             _ => self.emit_instruction(OpCode::OP_NULL),
         }
         self.consume(Token::SEMICOLON)?;
-        self.emit_instruction(OpCode::OP_DEFINE_GLOBAL(global));
+        match self.scope_depth > 0 {
+            true => {
+                self.mark_initialised();
+            }
+            false => self.emit_instruction(OpCode::OP_DEFINE_GLOBAL(global)),
+        }
         Ok(())
     }
 
@@ -289,22 +324,53 @@ impl<'a> Compiler<'a> {
     }
 
     fn variable(&mut self, can_assign: bool) -> Result<()> {
-        let last = &self.input[self.current - 1];
-        let name = &self.source[last.start..last.end];
-        let id = self.interner.intern(name.to_owned());
+        let name = self.get_last_as_interned();
+
+        let arg = self.resolve_local(name)?;
+        let (get_op, set_op);
+        match arg {
+            None => {
+                get_op = OpCode::OP_GET_GLOBAL(name);
+                set_op = OpCode::OP_SET_GLOBAL(name)
+            }
+            Some(u) => {
+                get_op = OpCode::OP_GET_LOCAL(u);
+                set_op = OpCode::OP_SET_LOCAL(u)
+            }
+        };
 
         match &self.input[self.current].ty {
             Token::EQUAL if can_assign => {
                 self.advance()?;
                 self.expression()?;
-                self.emit_instruction(OpCode::OP_SET_GLOBAL(id));
+                self.emit_instruction(set_op);
             }
             _ => {
-                self.emit_instruction(OpCode::OP_GET_GLOBAL(id));
+                self.emit_instruction(get_op);
             }
         }
 
         Ok(())
+    }
+
+    fn resolve_local(&mut self, name: usize) -> Result<Option<usize>> {
+        for i in (0..self.local_count).rev() {
+            let local = &self.locals[i];
+            if name == local.name {
+                dbg!(local);
+                if local.depth.is_none() {
+                    let last = self.input[self.current - 1];
+                    return Err(CompileTimeError {
+                        advice: "can't read local variable in its own initialiser!".into(),
+                        source_code: self.source.into(),
+                        err_span: (last.start..last.end).into(),
+                    }
+                    .into());
+                }
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
     }
 
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
@@ -339,7 +405,7 @@ impl<'a> Compiler<'a> {
             };
             self.parsefn_tofn(infix_rule, can_assign)?;
 
-            if can_assign && self.input[self.current].ty == Token::EQUAL {
+            if can_assign && self.check(Token::EQUAL) {
                 return Err(CompileTimeError {
                     source_code: self.source.into(),
                     err_span: (last.start..last.end).into(),
@@ -354,7 +420,49 @@ impl<'a> Compiler<'a> {
 
     fn parse_variable_name(&mut self) -> Result<usize> {
         self.consume(Token::IDENTIFIER)?;
-        self.identifier_constant(&self.input[self.current - 1])
+        self.declare_variable()?;
+        match self.scope_depth > 0 {
+            true => Ok(0),
+            false => self.identifier_constant(&self.input[self.current - 1]),
+        }
+    }
+
+    fn mark_initialised(&mut self) {
+        self.locals[self.local_count - 1].depth = NonZero::new(self.scope_depth)
+    }
+
+    fn declare_variable(&mut self) -> Result<()> {
+        if self.scope_depth == 0 {
+            return Ok(());
+        }
+
+        let name = self.get_last_as_interned();
+
+        for local in self.locals.iter().rev() {
+            if local.depth.is_some_and(|d| d.get() < self.scope_depth) {
+                break;
+            }
+
+            if name == local.name {
+                let last = self.input[self.current - 1];
+
+                return Err(CompileTimeError {
+                    advice: "there already exists a variable with this name in this scope.".into(),
+                    source_code: self.source.into(),
+                    err_span: (last.start..last.end).into(),
+                }
+                .into());
+            }
+        }
+
+        self.add_local(name);
+        Ok(())
+    }
+
+    fn add_local(&mut self, name: usize) {
+        self.locals.push(Local { name, depth: None });
+        // local.depth = NonZero::new(self.scope_depth);
+        self.local_count += 1;
     }
 
     fn identifier_constant(&mut self, token: &Lexeme) -> Result<usize> {
@@ -363,6 +471,14 @@ impl<'a> Compiler<'a> {
 
         let name = self.interner.intern(name.to_owned());
         Ok(name)
+    }
+
+    fn check(&mut self, token: Token) -> bool {
+        let curr = &self.input[self.current];
+        if curr.ty == token {
+            return true;
+        }
+        false
     }
 
     fn consume(&mut self, token: Token) -> Result<&Lexeme> {
@@ -391,5 +507,29 @@ impl<'a> Compiler<'a> {
     fn emit_value(&mut self, value: Value) {
         let v = self.add_constant(value);
         self.emit_instruction(OpCode::OP_CONSTANT(v));
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
+        while self.local_count > 0 {
+            if !match self.locals[self.local_count - 1].depth {
+                Some(v) => v.get() > self.scope_depth,
+                None => false,
+            } {
+                break;
+            }
+            self.emit_instruction(OpCode::OP_POP);
+            self.local_count -= 1;
+        }
+    }
+
+    fn get_last_as_interned(&mut self) -> usize {
+        let last = &self.input[self.current - 1];
+        let name = &self.source[last.start..last.end];
+        self.interner.intern(name.to_owned())
     }
 }

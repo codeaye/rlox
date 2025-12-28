@@ -1,13 +1,19 @@
+use rustc_hash::FxHashMap;
+
+use crate::vm::Value;
+
 pub type StringRef = usize;
 // change to struct and add marked for gc
 #[derive(Clone)]
 pub struct Arena {
     pub strings: Vec<String>,
+    pub globals: FxHashMap<usize, Value>,
 }
 
 impl Arena {
     pub fn new() -> Self {
         Self {
+            globals: FxHashMap::default(),
             strings: Vec::with_capacity(256),
         }
     }
