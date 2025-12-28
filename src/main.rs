@@ -1,3 +1,4 @@
+mod arena;
 mod compiler;
 mod errors;
 mod interner;
@@ -42,8 +43,12 @@ fn compile(source_str: &str) -> Result<()> {
     let mut vm = VM::new();
     let mut compiler = Compiler::new(&scanner.output, &mut vm, &mut interner, source_str);
     compiler.compile()?;
-    // println!("{:?}", vm);
-    vm.run(&mut interner)?;
+    #[cfg(debug_assertions)]
+    vm.debug(&interner);
+    dbg!(&interner);
+    vm.run(&interner)?;
+    // #[cfg(debug_assertions)]
+    // vm.debug(&interner);
     Ok(())
 }
 
@@ -66,11 +71,39 @@ fn main() -> Result<()> {
         }
     } else {
         loop {
-            read_input("> ", &mut buf).into_diagnostic()?;
-            let source_str = std::str::from_utf8(&buf).map_err(|_| InvalidSource {})?;
-            if let Err(e) = compile(source_str) {
-                println!("{:?}", e)
+            let mut buf_clone = buf.clone();
+            let mut new = Vec::new();
+
+            read_input("> ", &mut new).into_diagnostic()?;
+            buf_clone.append(&mut new);
+
+            let source_str = std::str::from_utf8(&buf_clone).map_err(|_| InvalidSource {})?;
+
+            let mut scanner = Scanner::new(source_str);
+            if let Err(e) = scanner.scan() {
+                println!("{:?}", e);
+                println!("-> Reverting to state from previous command");
+                continue;
+            };
+
+            let mut vm = VM::new();
+            let mut interner = Interner::new();
+
+            let mut compiler = Compiler::new(&scanner.output, &mut vm, &mut interner, source_str);
+
+            if let Err(e) = compiler.compile() {
+                println!("{:?}", e);
+                println!("-> Reverting to state from previous command");
+                continue;
+            };
+
+            if let Err(e) = vm.run(&interner) {
+                println!("{:?}", e);
+                println!("-> Reverting to state from previous command");
+                continue;
             }
+
+            buf = buf_clone
         }
     }
 

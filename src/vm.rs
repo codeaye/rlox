@@ -1,7 +1,12 @@
 use miette::Result;
-use std::fmt::Debug;
+use rustc_hash::FxHashMap;
+use std::{borrow::Cow, fmt::Debug};
 
-use crate::{errors::UnsupportedTypeConversion, interner::Interner};
+use crate::{
+    arena::{Arena, StringRef},
+    errors::{UndefinedVariable, UnsupportedTypeConversion},
+    interner::Interner,
+};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +28,12 @@ pub enum OpCode {
     OP_LESS,
     OP_GREATER_EQUAL,
     OP_LESS_EQUAL,
+
+    OP_PRINT,
+    OP_POP,
+    OP_DEFINE_GLOBAL(usize),
+    OP_SET_GLOBAL(usize),
+    OP_GET_GLOBAL(usize),
 }
 
 impl OpCode {
@@ -38,16 +49,17 @@ pub enum Value {
     Bool(bool),
     Null,
     Symbol(usize),
+    Str(StringRef),
 }
 
 impl Value {
-    pub fn as_number(&self) -> Result<f64> {
+    pub fn as_number(&self, line: usize) -> Result<f64> {
         match self {
             Self::Number(v) => Ok(*v),
             Self::Bool(true) => Ok(1.),
             Self::Bool(false) => Ok(0.),
             _ => Err(UnsupportedTypeConversion {
-                advice: format!("cannot convert '{self:?}' to a number"),
+                advice: format!("attempted to convert '{self:?}' to a number on line {line}",),
             }
             .into()),
         }
@@ -60,18 +72,36 @@ impl Value {
             _ => true,
         }
     }
+
+    pub fn as_string<'a>(&self, interner: &'a Interner, arena: &'a Arena) -> Cow<'a, str> {
+        match self {
+            Self::Symbol(a) => Cow::Borrowed(interner.resolve(*a)),
+            Self::Str(a) => Cow::Borrowed(arena.get_string(*a)),
+            Self::Null => Cow::Borrowed("null"),
+            Self::Bool(v) => match v {
+                true => Cow::Borrowed("true"),
+                false => Cow::Borrowed("false"),
+            },
+            Self::Number(v) => Cow::Owned(v.to_string()),
+        }
+    }
 }
 
+#[derive(Clone)]
 pub struct LineInfo {
     start: usize,
     line: usize,
 }
 
+#[derive(Clone)]
 pub struct VM {
     ip: usize,
+    arena: Arena,
     stack: Vec<Value>,
     instructions: Vec<OpCode>,
     values: Vec<Value>,
+    // <Interned name: Valuees id>
+    globals: FxHashMap<usize, Value>,
     lines: Vec<LineInfo>,
 }
 
@@ -81,9 +111,11 @@ impl VM {
         Self {
             ip: 0,
             instructions,
+            arena: Arena::new(),
             stack: Vec::with_capacity(256),
             values: Vec::new(),
             lines: Vec::new(),
+            globals: FxHashMap::default(),
         }
     }
 
@@ -125,50 +157,53 @@ impl VM {
     //     &self.values[self.values.len() - 1 - distance]
     // }
 
-    pub fn run(&mut self, interner: &mut Interner) -> Result<()> {
-        macro_rules! binop {
+    pub fn run(&mut self, interner: &Interner) -> Result<()> {
+        while self.ip < self.instructions.len() {
+            let instruction = *self.read_instruction();
+            let line = self.line_for_ip(self.ip);
+
+            macro_rules! binop {
             ($stack:expr, $wrap:ident, $op:tt) => {{
-                let a = $stack.pop().unwrap().as_number()?;
-                let b = $stack.pop().unwrap().as_number()?;
+                let a = $stack.pop().unwrap().as_number(line)?;
+                let b = $stack.pop().unwrap().as_number(line)?;
                 $stack.push(Value::$wrap(b $op a));
             }};
         }
 
-        while self.ip < self.instructions.len() {
-            let instruction = *self.read_instruction();
             use self::{OpCode::*, Value::*};
             match instruction {
                 OP_RETURN => {
                     println!("{:?}", self.stack);
                 }
                 OP_NEGATE => {
-                    let m = -self.stack.pop().unwrap().as_number()?;
+                    let m = -self.stack.pop().unwrap().as_number(line)?;
                     self.stack.push(Number(m));
                 }
                 OP_NOT => {
                     let m = !self.stack.pop().unwrap().as_bool();
                     self.stack.push(Bool(m));
                 }
-
                 OP_NULL => self.stack.push(Null),
                 OP_TRUE => self.stack.push(Bool(true)),
                 OP_FALSE => self.stack.push(Bool(false)),
                 OP_CONSTANT(c) => self.stack.push(self.values[c]),
-
                 OP_ADD => {
                     let b = self.stack.pop().unwrap();
                     let a = self.stack.pop().unwrap();
 
                     self.stack.push(match (a, b) {
-                        (Symbol(a), Symbol(b)) => {
-                            let (mut a, b) = (
-                                interner.resolve(a).unwrap().clone(),
-                                interner.resolve(b).unwrap(),
+                        (Symbol(_), _) | (Str(_), _) => {
+                            let (a, b) = (
+                                a.as_string(interner, &self.arena),
+                                b.as_string(interner, &self.arena),
                             );
-                            a.push_str(b);
-                            Value::Symbol(interner.intern(a.to_string()))
+                            let mut c = String::with_capacity(a.len() + b.len());
+                            c.push_str(&a);
+                            c.push_str(&b);
+
+                            Value::Str(self.arena.alloc_string(c))
                         }
-                        _ => Value::Number(a.as_number()? + b.as_number()?),
+                        _ => Value::Number(a.as_number(line)? + b.as_number(line)?),
                     });
                 }
                 OP_SUBTRACT => binop!(self.stack, Number,  -),
@@ -180,6 +215,44 @@ impl VM {
                 OP_LESS => binop!(self.stack, Bool, <),
                 OP_GREATER_EQUAL => binop!(self.stack, Bool, >=),
                 OP_LESS_EQUAL => binop!(self.stack, Bool, <=),
+                OP_PRINT => println!(
+                    "{}",
+                    self.stack.pop().unwrap().as_string(interner, &self.arena)
+                ),
+                OP_POP => {
+                    let _ = self.stack.pop();
+                }
+                OP_DEFINE_GLOBAL(v) => {
+                    let value = self.stack.pop().unwrap();
+                    self.globals.insert(v, value);
+                }
+                OP_GET_GLOBAL(v) => {
+                    self.stack
+                        .push(*self.globals.get(&v).ok_or_else(|| UndefinedVariable {
+                            advice: format!(
+                                "undefined variable \"{}\" referenced on line {}.",
+                                interner.resolve(v),
+                                self.line_for_ip(self.ip)
+                            ),
+                        })?)
+                }
+                OP_SET_GLOBAL(v) => {
+                    let value = self.stack.pop().unwrap();
+                    let key = self.globals.get_mut(&v);
+
+                    let Some(key) = key else {
+                        return Err(UndefinedVariable {
+                            advice: format!(
+                                "undefined variable \"{}\" referenced on line {}.",
+                                interner.resolve(v),
+                                self.line_for_ip(self.ip)
+                            ),
+                        }
+                        .into());
+                    };
+
+                    *key = value
+                }
             }
         }
 
@@ -188,33 +261,56 @@ impl VM {
 }
 
 #[cfg(debug_assertions)]
-impl Debug for VM {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("Stack: {:?}\n", self.stack))?;
+impl VM {
+    pub fn debug(&self, interner: &Interner) {
+        println!("Stack: {:?}", self.stack);
+        println!("Values: ");
+
+        for value in self.values.iter() {
+            println!(
+                "   {:?}: {}",
+                value,
+                match value {
+                    Value::Number(b) => b.to_string(),
+                    Value::Bool(v) => v.to_string(),
+                    Value::Null => "null".to_owned(),
+                    Value::Symbol(a) => interner.resolve(*a).to_string(),
+                    Value::Str(a) => self.arena.get_string(*a).to_string(),
+                }
+            )
+        }
+
+        println!("Arena: ");
+
+        for (i, val) in self.arena.strings.iter().enumerate() {
+            println!("   {:?}: {}", i, val)
+        }
+
+        println!("Instructions:");
+
         for (i, instruction) in self.instructions.iter().enumerate() {
+            print!("    ");
             match instruction.is_simple() {
-                true => f.write_fmt(format_args!(
-                    "{:0>4}L{:0>4} {:?} \n",
-                    i,
-                    self.line_for_ip(i),
-                    instruction,
-                ))?,
+                true => println!("{:0>4}L{:0>4} {:?} ", i, self.line_for_ip(i), instruction,),
                 false => match instruction {
-                    v @ OpCode::OP_CONSTANT(x) => f.write_fmt(format_args!(
-                        "{:0>4}L{:0>4} {:?} -> {:?} \n",
+                    v @ OpCode::OP_CONSTANT(x) => println!(
+                        "{:0>4}L{:0>4} {:?} -> {:?} ",
                         i,
                         self.line_for_ip(i),
                         v,
                         match self.values[*x] {
-                            Value::Number(b) => b,
-                            _ => unreachable!(),
+                            Value::Number(b) => b.to_string(),
+                            Value::Bool(v) => v.to_string(),
+                            Value::Null => "null".to_owned(),
+                            Value::Symbol(a) => interner.resolve(a).to_string(),
+                            Value::Str(a) => self.arena.get_string(a).to_string(),
                         },
-                    ))?,
+                    ),
                     _ => unreachable!(),
                 },
             }
         }
 
-        f.write_str("\n")
+        println!()
     }
 }

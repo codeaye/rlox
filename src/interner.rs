@@ -25,7 +25,7 @@ impl Interner {
         }
     }
 
-    pub fn resolve(&self, id: usize) -> Option<&String> {
-        self.ids.get(id)
+    pub fn resolve(&self, id: usize) -> &str {
+        &self.ids[id]
     }
 }

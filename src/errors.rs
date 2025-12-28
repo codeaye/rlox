@@ -79,7 +79,20 @@ pub struct ExpectExpression {
     pub err_span: SourceSpan,
 }
 
-// #[derive(Debug, Diagnostic, Error)]
-// #[error("stack not deep enough to peek")]
-// #[diagnostic(severity(Error))]
-// pub struct StackPeekError;
+#[derive(Debug, Diagnostic, Error)]
+#[error("invalid assignment target")]
+#[diagnostic(severity(Error))]
+pub struct InvalidAssignmentTarget {
+    #[source_code]
+    pub source_code: Arc<str>,
+    #[label]
+    pub err_span: SourceSpan,
+}
+
+#[derive(Debug, Diagnostic, Error)]
+#[error("undefined variable")]
+#[diagnostic(severity(Error))]
+pub struct UndefinedVariable {
+    #[help]
+    pub advice: String,
+}

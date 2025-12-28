@@ -6,7 +6,7 @@ set quiet := true
 debug:
     cargo run -- test.sel
 showcase:
-    just build && just run && time ./target/release/selena test.sel
+    just build && time ./target/release/selena test.sel
 build:
     cargo build --release --quiet > log
 run:

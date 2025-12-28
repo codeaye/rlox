@@ -1,7 +1,7 @@
 use miette::Result;
 
 use crate::{
-    errors::{ExpectExpression, ParseNumberError, TokenNotFound},
+    errors::{ExpectExpression, InvalidAssignmentTarget, ParseNumberError, TokenNotFound},
     interner::Interner,
     scanner::{Lexeme, Token},
     vm::{OpCode, VM, Value},
@@ -50,6 +50,7 @@ enum ParseFn {
     Number,
     String,
     Literal,
+    Variable,
 }
 
 // (prefix, infix, precedence)
@@ -69,6 +70,7 @@ fn parse_token_to_rule(token: &Token) -> ParseRule {
         BANG => (Unary, None, PREC_UNARY),
         BANG_EQUAL | EQUAL_EQUAL => (None, Binary, PREC_EQUALITY),
         GREATER | GREATER_EQUAL | LESS | LESS_EQUAL => (None, Binary, PREC_COMPARISON),
+        IDENTIFIER => (Variable, None, PREC_NONE),
         _ => (None, None, PREC_NONE),
     }
 }
@@ -97,7 +99,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn parsefn_tofn(&mut self, rule: ParseFn) -> Result<()> {
+    fn parsefn_tofn(&mut self, rule: ParseFn, can_assign: bool) -> Result<()> {
         match rule {
             ParseFn::Grouping => self.grouping(),
             ParseFn::Unary => self.unary(),
@@ -105,20 +107,75 @@ impl<'a> Compiler<'a> {
             ParseFn::Number => self.number(),
             ParseFn::Literal => self.literal(),
             ParseFn::String => self.string(),
+            ParseFn::Variable => self.variable(can_assign),
             ParseFn::None => unreachable!(),
         }
     }
 
     pub fn compile(&mut self) -> Result<()> {
-        self.expression()?;
+        while self.input[self.current].ty != Token::EOF {
+            self.declaration()?;
+        }
 
         self.consume(Token::EOF)?;
-        self.emit_instruction(OpCode::OP_RETURN);
         Ok(())
     }
 
     fn advance(&mut self) -> Result<()> {
         self.current += 1;
+        Ok(())
+    }
+
+    fn declaration(&mut self) -> Result<()> {
+        match &self.input[self.current].ty {
+            Token::VAR => {
+                self.advance()?;
+                self.var_stmt()
+            }
+            _ => self.statement(),
+        }
+    }
+
+    fn statement(&mut self) -> Result<()> {
+        let curr = &self.input[self.current];
+
+        match curr.ty {
+            Token::PRINT => {
+                self.advance()?;
+                self.print_stmt()
+            }
+            _ => self.expression_stmt(),
+        }
+    }
+
+    fn print_stmt(&mut self) -> Result<()> {
+        self.expression()?;
+        self.consume(Token::SEMICOLON)?;
+        self.emit_instruction(OpCode::OP_PRINT);
+        Ok(())
+    }
+
+    fn expression_stmt(&mut self) -> Result<()> {
+        self.expression()?;
+        self.consume(Token::SEMICOLON)?;
+        self.emit_instruction(OpCode::OP_POP);
+        Ok(())
+    }
+
+    fn var_stmt(&mut self) -> Result<()> {
+        let global = self.parse_variable_name()?;
+
+        let curr = &self.input[self.current];
+
+        match curr.ty {
+            Token::EQUAL => {
+                self.advance()?;
+                self.expression()?
+            }
+            _ => self.emit_instruction(OpCode::OP_NULL),
+        }
+        self.consume(Token::SEMICOLON)?;
+        self.emit_instruction(OpCode::OP_DEFINE_GLOBAL(global));
         Ok(())
     }
 
@@ -168,7 +225,8 @@ impl<'a> Compiler<'a> {
 
     fn grouping(&mut self) -> Result<()> {
         self.expression()?;
-        self.consume(Token::RIGHT_PAREN)
+        self.consume(Token::RIGHT_PAREN)?;
+        Ok(())
     }
 
     fn unary(&mut self) -> Result<()> {
@@ -214,6 +272,37 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn literal(&mut self) -> Result<()> {
+        let last = &self.input[self.current - 1].ty;
+        match last {
+            Token::FALSE => self.emit_instruction(OpCode::OP_FALSE),
+            Token::TRUE => self.emit_instruction(OpCode::OP_TRUE),
+            Token::NULL => self.emit_instruction(OpCode::OP_NULL),
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    fn variable(&mut self, can_assign: bool) -> Result<()> {
+        let last = &self.input[self.current - 1];
+        let name = &self.source[last.start..last.end];
+        let id = self.interner.intern(name.to_owned());
+
+        match &self.input[self.current].ty {
+            Token::EQUAL if can_assign => {
+                self.advance()?;
+                self.expression()?;
+                self.emit_instruction(OpCode::OP_SET_GLOBAL(id));
+            }
+            _ => {
+                self.emit_instruction(OpCode::OP_GET_GLOBAL(id));
+            }
+        }
+
+        Ok(())
+    }
+
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
         self.advance()?;
         let last = &self.input[self.current - 1];
@@ -226,8 +315,10 @@ impl<'a> Compiler<'a> {
             .into());
         };
 
-        self.parsefn_tofn(prefix_rule)?;
         let v = precedence as u8;
+        let can_assign = v <= Precedence::PREC_ASSIGNMENT as u8;
+
+        self.parsefn_tofn(prefix_rule, can_assign)?;
 
         while v <= parse_token_to_rule(&self.input[self.current].ty).2 as u8 {
             self.advance()?;
@@ -240,27 +331,38 @@ impl<'a> Compiler<'a> {
                 }
                 .into());
             };
-            self.parsefn_tofn(infix_rule)?;
+            self.parsefn_tofn(infix_rule, can_assign)?;
+
+            if can_assign && self.input[self.current].ty == Token::EQUAL {
+                return Err(InvalidAssignmentTarget {
+                    source_code: self.source.into(),
+                    err_span: (last.start..last.end).into(),
+                }
+                .into());
+            }
         }
 
         Ok(())
     }
 
-    fn literal(&mut self) -> Result<()> {
-        let last = &self.input[self.current - 1].ty;
-        match last {
-            Token::FALSE => self.emit_instruction(OpCode::OP_FALSE),
-            Token::TRUE => self.emit_instruction(OpCode::OP_TRUE),
-            Token::NULL => self.emit_instruction(OpCode::OP_NULL),
-            _ => unreachable!(),
-        }
-
-        Ok(())
+    fn parse_variable_name(&mut self) -> Result<usize> {
+        self.consume(Token::IDENTIFIER)?;
+        self.identifier_constant(&self.input[self.current - 1])
     }
-    fn consume(&mut self, token: Token) -> Result<()> {
+
+    fn identifier_constant(&mut self, token: &Lexeme) -> Result<usize> {
+        let range = token.start..token.end;
+        let name = &self.source[range];
+
+        let name = self.interner.intern(name.to_owned());
+        Ok(name)
+    }
+
+    fn consume(&mut self, token: Token) -> Result<&Lexeme> {
         let curr = &self.input[self.current];
         if curr.ty == token {
-            return self.advance();
+            let _ = self.advance();
+            return Ok(curr);
         }
         Err(TokenNotFound {
             advice: format!("A token of type '{:?}' was not found!", token),
@@ -270,13 +372,17 @@ impl<'a> Compiler<'a> {
         .into())
     }
 
+    fn add_constant(&mut self, value: Value) -> usize {
+        self.vm.add_value(value)
+    }
+
     fn emit_instruction(&mut self, instruction: OpCode) {
         self.vm
             .add_instruction(instruction, self.input[self.current - 1].line_n);
     }
 
     fn emit_value(&mut self, value: Value) {
-        let id = self.vm.add_value(value);
-        self.emit_instruction(OpCode::OP_CONSTANT(id));
+        let v = self.add_constant(value);
+        self.emit_instruction(OpCode::OP_CONSTANT(v));
     }
 }
