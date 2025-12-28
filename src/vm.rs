@@ -4,7 +4,7 @@ use std::{borrow::Cow, fmt::Debug};
 
 use crate::{
     arena::{Arena, StringRef},
-    errors::{UndefinedVariable, UnsupportedTypeConversion},
+    errors::RuntimeError,
     interner::Interner,
 };
 
@@ -58,7 +58,7 @@ impl Value {
             Self::Number(v) => Ok(*v),
             Self::Bool(true) => Ok(1.),
             Self::Bool(false) => Ok(0.),
-            _ => Err(UnsupportedTypeConversion {
+            _ => Err(RuntimeError {
                 advice: format!("attempted to convert '{self:?}' to a number on line {line}",),
             }
             .into()),
@@ -228,7 +228,7 @@ impl VM {
                 }
                 OP_GET_GLOBAL(v) => {
                     self.stack
-                        .push(*self.globals.get(&v).ok_or_else(|| UndefinedVariable {
+                        .push(*self.globals.get(&v).ok_or_else(|| RuntimeError {
                             advice: format!(
                                 "undefined variable \"{}\" referenced on line {}.",
                                 interner.resolve(v),
@@ -241,7 +241,7 @@ impl VM {
                     let key = self.globals.get_mut(&v);
 
                     let Some(key) = key else {
-                        return Err(UndefinedVariable {
+                        return Err(RuntimeError {
                             advice: format!(
                                 "undefined variable \"{}\" referenced on line {}.",
                                 interner.resolve(v),

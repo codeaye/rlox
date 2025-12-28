@@ -1,7 +1,7 @@
 use miette::Result;
 
 use crate::{
-    errors::{ExpectExpression, InvalidAssignmentTarget, ParseNumberError, TokenNotFound},
+    errors::CompileTimeError,
     interner::Interner,
     scanner::{Lexeme, Token},
     vm::{OpCode, VM, Value},
@@ -195,9 +195,13 @@ impl<'a> Compiler<'a> {
         };
 
         let bytes = &self.source.as_bytes()[*start..*end];
-        let value = lexical_core::parse::<f64>(bytes).map_err(|_| ParseNumberError {
+        let value = lexical_core::parse::<f64>(bytes).map_err(|_| CompileTimeError {
             source_code: self.source.into(),
             err_span: (*start..*end).into(),
+            advice: format!(
+                "could not parse \"{}\" as number!",
+                str::from_utf8(bytes).unwrap()
+            ),
         })?;
 
         self.emit_value(Value::Number(value));
@@ -308,9 +312,10 @@ impl<'a> Compiler<'a> {
         let last = &self.input[self.current - 1];
         let prefix_rule = parse_token_to_rule(&last.ty).0;
         if matches!(prefix_rule, ParseFn::None) {
-            return Err(ExpectExpression {
+            return Err(CompileTimeError {
                 source_code: self.source.into(),
                 err_span: (last.start..last.end).into(),
+                advice: "expected an expression!".into(),
             }
             .into());
         };
@@ -325,18 +330,20 @@ impl<'a> Compiler<'a> {
             let last = &self.input[self.current - 1];
             let infix_rule = parse_token_to_rule(&last.ty).1;
             if matches!(infix_rule, ParseFn::None) {
-                return Err(ExpectExpression {
+                return Err(CompileTimeError {
                     source_code: self.source.into(),
                     err_span: (last.start..last.end).into(),
+                    advice: "expected an expression!".into(),
                 }
                 .into());
             };
             self.parsefn_tofn(infix_rule, can_assign)?;
 
             if can_assign && self.input[self.current].ty == Token::EQUAL {
-                return Err(InvalidAssignmentTarget {
+                return Err(CompileTimeError {
                     source_code: self.source.into(),
                     err_span: (last.start..last.end).into(),
+                    advice: "this is an invalid assignment target!".into(),
                 }
                 .into());
             }
@@ -364,7 +371,7 @@ impl<'a> Compiler<'a> {
             let _ = self.advance();
             return Ok(curr);
         }
-        Err(TokenNotFound {
+        Err(CompileTimeError {
             advice: format!("A token of type '{:?}' was not found!", token),
             source_code: self.source.into(),
             err_span: (curr.start..curr.end).into(),

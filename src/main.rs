@@ -14,11 +14,7 @@ use std::{
 };
 
 use crate::{
-    compiler::Compiler,
-    errors::{InvalidInputPath, InvalidSource},
-    interner::Interner,
-    scanner::Scanner,
-    vm::VM,
+    compiler::Compiler, errors::ProcessError, interner::Interner, scanner::Scanner, vm::VM,
 };
 
 fn read_input(prompt: &str, buf: &mut Vec<u8>) -> Result<(), std::io::Error> {
@@ -61,10 +57,12 @@ fn main() -> Result<()> {
         let path = PathBuf::from(&path_loc);
         if path.is_file() {
             read_file(path, &mut buf).into_diagnostic()?;
-            let source_str = std::str::from_utf8(&buf).map_err(|_| InvalidSource {})?;
+            let source_str = std::str::from_utf8(&buf).map_err(|_| ProcessError {
+                advice: "invalid source provided as input!".into(),
+            })?;
             compile(source_str)?;
         } else {
-            return Err(InvalidInputPath {
+            return Err(ProcessError {
                 advice: format!("the file \"{}\" does not exist!", path_loc),
             }
             .into());
@@ -77,7 +75,9 @@ fn main() -> Result<()> {
             read_input("> ", &mut new).into_diagnostic()?;
             buf_clone.append(&mut new);
 
-            let source_str = std::str::from_utf8(&buf_clone).map_err(|_| InvalidSource {})?;
+            let source_str = std::str::from_utf8(&buf_clone).map_err(|_| ProcessError {
+                advice: "invalid source provided as input!".into(),
+            })?;
 
             let mut scanner = Scanner::new(source_str);
             if let Err(e) = scanner.scan() {

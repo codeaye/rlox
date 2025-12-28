@@ -1,7 +1,7 @@
 use miette::Result;
 use std::fmt::Debug;
 
-use crate::errors::{UnknownCharacter, UnterminatedString};
+use crate::errors::CompileTimeError;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[rustfmt::skip]
@@ -128,9 +128,10 @@ impl<'a> Scanner<'a> {
                 }
 
                 if self.is_at_end() {
-                    return Err(UnterminatedString {
+                    return Err(CompileTimeError {
                         source_code: self.source_str.into(),
                         err_span: (self.selection_start..self.selection_start).into(),
+                        advice: "an unterminated string was found!".into(),
                     }
                     .into());
                 }
@@ -183,7 +184,7 @@ impl<'a> Scanner<'a> {
             }
             b'\n' => self.line += 1,
             c => {
-                return Err(UnknownCharacter {
+                return Err(CompileTimeError {
                     advice: format!(
                         "unknown character found: \'{}\'",
                         char::from_u32(c as u32).unwrap_or('§')
