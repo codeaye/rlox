@@ -439,19 +439,20 @@ impl<'a> Compiler<'a> {
         let name = self.get_last_as_interned();
 
         for local in self.locals.iter().rev() {
-            if local.depth.is_some_and(|d| d.get() < self.scope_depth) {
-                break;
-            }
-
-            if name == local.name {
-                let last = self.input[self.current - 1];
-
-                return Err(CompileTimeError {
-                    advice: "there already exists a variable with this name in this scope.".into(),
-                    source_code: self.source.into(),
-                    err_span: (last.start..last.end).into(),
+            match local.depth {
+                Some(d) if d.get() < self.scope_depth => break,
+                Some(_) | None => {
+                    if name == local.name {
+                        let last = self.input[self.current - 1];
+                        return Err(CompileTimeError {
+                            advice: "there already exists a variable with this name in this scope."
+                                .into(),
+                            source_code: self.source.into(),
+                            err_span: (last.start..last.end).into(),
+                        }
+                        .into());
+                    }
                 }
-                .into());
             }
         }
 
@@ -516,14 +517,18 @@ impl<'a> Compiler<'a> {
     fn end_scope(&mut self) {
         self.scope_depth -= 1;
         while self.local_count > 0 {
-            if !match self.locals[self.local_count - 1].depth {
-                Some(v) => v.get() > self.scope_depth,
-                None => false,
-            } {
+            let remove = match self.locals[self.local_count - 1].depth {
+                Some(d) => d.get() > self.scope_depth,
+                None => true,
+            };
+
+            if !remove {
                 break;
             }
+
             self.emit_instruction(OpCode::OP_POP);
             self.local_count -= 1;
+            self.locals.pop();
         }
     }
 
