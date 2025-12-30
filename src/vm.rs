@@ -1,11 +1,7 @@
 use miette::Result;
 use std::{borrow::Cow, fmt::Debug};
 
-use crate::{
-    arena::{Arena, StringRef},
-    errors::RuntimeError,
-    interner::Interner,
-};
+use crate::{arena::Arena, errors::RuntimeError, interner::Interner};
 
 #[allow(non_camel_case_types, unused)]
 #[derive(Debug, Clone, Copy)]
@@ -16,7 +12,7 @@ pub enum OpCode {
     OP_SUBTRACT,
     OP_MULTIPLY,
     OP_DIVIDE,
-    OP_CONSTANT(usize),
+    OP_CONSTANT(u32),
     OP_NULL,
     OP_TRUE,
     OP_FALSE,
@@ -30,12 +26,16 @@ pub enum OpCode {
 
     OP_PRINT,
     OP_POP,
-    OP_DEFINE_GLOBAL(usize),
-    OP_SET_GLOBAL(usize),
-    OP_GET_GLOBAL(usize),
+    OP_DEFINE_GLOBAL(u32),
+    OP_SET_GLOBAL(u32),
+    OP_GET_GLOBAL(u32),
 
-    OP_SET_LOCAL(usize),
-    OP_GET_LOCAL(usize),
+    OP_SET_LOCAL(u32),
+    OP_GET_LOCAL(u32),
+
+    OP_JUMP_IF_FALSE(u32),
+    OP_JUMP(u32),
+    OP_LOOP(u32),
 }
 
 impl OpCode {
@@ -50,8 +50,8 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Null,
-    Symbol(usize),
-    Str(StringRef),
+    Symbol(u32),
+    Str(u32),
 }
 
 impl Value {
@@ -100,7 +100,7 @@ pub struct VM {
     ip: usize,
     arena: Arena,
     stack: Vec<Value>,
-    instructions: Vec<OpCode>,
+    pub(crate) instructions: Vec<OpCode>,
     values: Vec<Value>,
     // <Interned name: Valuees id>
     lines: Vec<LineInfo>,
@@ -186,7 +186,7 @@ impl VM {
                 OP_NULL => self.stack.push(Null),
                 OP_TRUE => self.stack.push(Bool(true)),
                 OP_FALSE => self.stack.push(Bool(false)),
-                OP_CONSTANT(c) => self.stack.push(self.values[c]),
+                OP_CONSTANT(c) => self.stack.push(self.values[c as usize]),
                 OP_ADD => {
                     let b = self.stack.pop().unwrap();
                     let a = self.stack.pop().unwrap();
@@ -201,7 +201,7 @@ impl VM {
                             c.push_str(&a);
                             c.push_str(&b);
 
-                            Value::Str(self.arena.alloc_string(c))
+                            Value::Str(self.arena.alloc_string(c).get())
                         }
                         _ => Value::Number(a.as_number(line)? + b.as_number(line)?),
                     });
@@ -253,9 +253,15 @@ impl VM {
 
                     *key = value
                 }
-
-                OP_SET_LOCAL(slot) => self.stack[slot] = *self.stack.last().unwrap(),
-                OP_GET_LOCAL(slot) => self.stack.push(self.stack[slot]),
+                OP_SET_LOCAL(slot) => self.stack[slot as usize] = *self.stack.last().unwrap(),
+                OP_GET_LOCAL(slot) => self.stack.push(self.stack[slot as usize]),
+                OP_JUMP_IF_FALSE(jump) => {
+                    if !self.stack.last().unwrap().as_bool() {
+                        self.ip += jump as usize
+                    }
+                }
+                OP_JUMP(jump) => self.ip += jump as usize,
+                OP_LOOP(jump) => self.ip -= jump as usize,
             }
         }
 
@@ -294,14 +300,14 @@ impl VM {
         for (i, instruction) in self.instructions.iter().enumerate() {
             print!("    ");
             match instruction.is_simple() {
-                true => println!("{:0>4}L{:0>4} {:?} ", i, self.line_for_ip(i), instruction,),
+                true => println!("{:0>4}L{:0>4} {:?} ", i, self.line_for_ip(i), instruction),
                 false => match instruction {
                     v @ OpCode::OP_CONSTANT(x) => println!(
                         "{:0>4}L{:0>4} {:?} -> {:?} ",
                         i,
                         self.line_for_ip(i),
                         v,
-                        match self.values[*x] {
+                        match self.values[*x as usize] {
                             Value::Number(b) => b.to_string(),
                             Value::Bool(v) => v.to_string(),
                             Value::Null => "null".to_owned(),

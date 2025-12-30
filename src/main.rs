@@ -32,12 +32,12 @@ fn read_file(path: PathBuf, buf: &mut Vec<u8>) -> Result<(), std::io::Error> {
 }
 
 fn compile(source_str: &str) -> Result<()> {
-    let mut scanner = Scanner::new(source_str);
+    let mut interner = Interner::new();
+    let mut scanner = Scanner::new(source_str, &mut interner);
     scanner.scan()?;
     // println!("{:#?}", scanner.output);
-    let mut interner = Interner::new();
     let mut vm = VM::new();
-    let mut compiler = Compiler::new(&scanner.output, &mut vm, &mut interner, source_str);
+    let mut compiler = Compiler::new(&scanner.output, &mut vm, source_str);
     compiler.compile()?;
     #[cfg(debug_assertions)]
     vm.debug(&interner);
@@ -78,8 +78,9 @@ fn main() -> Result<()> {
             let source_str = std::str::from_utf8(&buf_clone).map_err(|_| ProcessError {
                 advice: "invalid source provided as input!".into(),
             })?;
+            let mut interner: Interner = Interner::new();
 
-            let mut scanner = Scanner::new(source_str);
+            let mut scanner = Scanner::new(source_str, &mut interner);
             if let Err(e) = scanner.scan() {
                 println!("{:?}", e);
                 println!("-> Reverting to state from previous command");
@@ -87,9 +88,8 @@ fn main() -> Result<()> {
             };
 
             let mut vm = VM::new();
-            let mut interner = Interner::new();
 
-            let mut compiler = Compiler::new(&scanner.output, &mut vm, &mut interner, source_str);
+            let mut compiler = Compiler::new(&scanner.output, &mut vm, source_str);
 
             if let Err(e) = compiler.compile() {
                 println!("{:?}", e);

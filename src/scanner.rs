@@ -1,10 +1,11 @@
-use miette::Result;
+use miette::{Result, SourceSpan};
 use std::fmt::Debug;
 
-use crate::errors::CompileTimeError;
+use crate::{arena::StringRef, errors::CompileTimeError, interner::Interner};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[rustfmt::skip]
+#[repr(u8)]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 pub enum Token {
   // Single-character tokens.
@@ -31,9 +32,38 @@ pub enum Token {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lexeme {
     pub ty: Token,
-    pub line_n: usize,
-    pub start: usize,
-    pub end: usize,
+    pub line_n: u32,
+    pub start: u32,
+    pub len: u16,
+    pub symbol: Option<StringRef>,
+}
+
+impl Lexeme {
+    pub fn new(
+        ty: Token,
+        line_n: usize,
+        start: usize,
+        end: usize,
+        symbol: Option<StringRef>,
+    ) -> Self {
+        Self {
+            ty,
+            line_n: line_n as u32,
+            start: start as u32,
+            len: (end - start) as u16,
+            symbol,
+        }
+    }
+
+    pub fn find<'a>(&self, source: &'a str) -> &'a str {
+        &source[(self.start as usize)..(self.start as usize + self.len as usize)]
+    }
+}
+
+impl From<&Lexeme> for SourceSpan {
+    fn from(val: &Lexeme) -> Self {
+        SourceSpan::from((val.start as usize, val.len as usize))
+    }
 }
 
 pub struct Scanner<'a> {
@@ -41,16 +71,18 @@ pub struct Scanner<'a> {
     selection_start: usize,
     selection_end: usize,
     line: usize,
+    interner: &'a mut Interner,
     pub output: Vec<Lexeme>,
 }
 
 impl<'a> Scanner<'a> {
-    pub fn new(source_str: &'a str) -> Self {
+    pub fn new(source_str: &'a str, interner: &'a mut Interner) -> Self {
         Self {
             source_str,
             selection_start: 0,
             selection_end: 0,
-            line: 0,
+            line: 1,
+            interner,
             output: Vec::new(),
         }
     }
@@ -67,9 +99,10 @@ impl<'a> Scanner<'a> {
 
         self.output.push(Lexeme {
             ty: Token::EOF,
-            line_n: self.line,
-            start: self.source_str.len(),
-            end: self.source_str.len(),
+            line_n: self.line as u32,
+            start: self.source_str.len() as u32,
+            len: 1,
+            symbol: None,
         });
 
         Ok(())
@@ -137,12 +170,18 @@ impl<'a> Scanner<'a> {
                 }
 
                 self.advance();
-                self.output.push(Lexeme {
-                    ty: Token::STRING,
-                    line_n: self.line,
-                    start: (self.selection_start + 1),
-                    end: (self.selection_end - 1),
-                });
+                self.output.push(Lexeme::new(
+                    Token::STRING,
+                    self.line,
+                    self.selection_start + 1,
+                    self.selection_end - 1,
+                    Some(
+                        self.interner.intern(
+                            self.source_str[self.selection_start + 1..self.selection_end - 1]
+                                .to_owned(),
+                        ),
+                    ),
+                ));
             }
             b'0'..=b'9' => {
                 while self.peek().is_ascii_digit() {
@@ -160,27 +199,26 @@ impl<'a> Scanner<'a> {
                 while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'0'..=b'9') {
                     self.advance();
                 }
-                self.add_token(
-                    match &self.source_str.as_bytes()[self.selection_start..self.selection_end] {
-                        b"and" => Token::AND,
-                        b"class" => Token::CLASS,
-                        b"else" => Token::ELSE,
-                        b"false" => Token::FALSE,
-                        b"for" => Token::FOR,
-                        b"fun" => Token::FUN,
-                        b"if" => Token::IF,
-                        b"null" => Token::NULL,
-                        b"or" => Token::OR,
-                        b"print" => Token::PRINT,
-                        b"return" => Token::RETURN,
-                        b"super" => Token::SUPER,
-                        b"this" => Token::THIS,
-                        b"true" => Token::TRUE,
-                        b"var" => Token::VAR,
-                        b"while" => Token::WHILE,
-                        _ => Token::IDENTIFIER,
-                    },
-                );
+
+                match &self.source_str.as_bytes()[self.selection_start..self.selection_end] {
+                    b"and" => self.add_token(Token::AND),
+                    b"class" => self.add_token(Token::CLASS),
+                    b"else" => self.add_token(Token::ELSE),
+                    b"false" => self.add_token(Token::FALSE),
+                    b"for" => self.add_token(Token::FOR),
+                    b"fun" => self.add_token(Token::FUN),
+                    b"if" => self.add_token(Token::IF),
+                    b"null" => self.add_token(Token::NULL),
+                    b"or" => self.add_token(Token::OR),
+                    b"print" => self.add_token(Token::PRINT),
+                    b"return" => self.add_token(Token::RETURN),
+                    b"super" => self.add_token(Token::SUPER),
+                    b"this" => self.add_token(Token::THIS),
+                    b"true" => self.add_token(Token::TRUE),
+                    b"var" => self.add_token(Token::VAR),
+                    b"while" => self.add_token(Token::WHILE),
+                    _ => self.add_token_sy(Token::IDENTIFIER),
+                }
             }
             b'\n' => self.line += 1,
             c => {
@@ -228,11 +266,26 @@ impl<'a> Scanner<'a> {
     }
 
     fn add_token(&mut self, ty: Token) {
-        self.output.push(Lexeme {
+        self.output.push(Lexeme::new(
             ty,
-            line_n: self.line,
-            start: self.selection_start,
-            end: self.selection_end,
-        });
+            self.line,
+            self.selection_start,
+            self.selection_end,
+            None,
+        ));
+    }
+
+    fn add_token_sy(&mut self, ty: Token) {
+        self.output.push(Lexeme::new(
+            ty,
+            self.line,
+            self.selection_start,
+            self.selection_end,
+            Some(
+                self.interner.intern(
+                    self.source_str[(self.selection_start)..(self.selection_end)].to_owned(),
+                ),
+            ),
+        ));
     }
 }

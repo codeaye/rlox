@@ -1,13 +1,15 @@
+use std::num::NonZero;
+
 use rustc_hash::FxHashMap;
 
 use crate::vm::Value;
 
-pub type StringRef = usize;
+pub type StringRef = NonZero<u32>;
 // change to struct and add marked for gc
 #[derive(Clone)]
 pub struct Arena {
     pub strings: Vec<String>,
-    pub globals: FxHashMap<usize, Value>,
+    pub globals: FxHashMap<u32, Value>,
 }
 
 impl Arena {
@@ -20,10 +22,10 @@ impl Arena {
 
     pub fn alloc_string(&mut self, obj: String) -> StringRef {
         self.strings.push(obj);
-        self.strings.len() - 1
+        NonZero::new(self.strings.len() as u32).unwrap()
     }
 
-    pub fn get_string(&self, id: StringRef) -> &str {
-        &self.strings[id]
+    pub fn get_string(&self, id: u32) -> &str {
+        &self.strings[(id - 1) as usize]
     }
 }

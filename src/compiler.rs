@@ -4,7 +4,6 @@ use miette::Result;
 
 use crate::{
     errors::CompileTimeError,
-    interner::Interner,
     scanner::{Lexeme, Token},
     vm::{OpCode, VM, Value},
 };
@@ -53,6 +52,8 @@ enum ParseFn {
     String,
     Literal,
     Variable,
+    And,
+    Or,
 }
 
 // (prefix, infix, precedence)
@@ -73,13 +74,15 @@ fn parse_token_to_rule(token: &Token) -> ParseRule {
         BANG_EQUAL | EQUAL_EQUAL => (None, Binary, PREC_EQUALITY),
         GREATER | GREATER_EQUAL | LESS | LESS_EQUAL => (None, Binary, PREC_COMPARISON),
         IDENTIFIER => (Variable, None, PREC_NONE),
+        AND => (None, And, PREC_AND),
+        OR => (None, Or, PREC_OR),
         _ => (None, None, PREC_NONE),
     }
 }
 
 #[derive(Debug)]
 struct Local {
-    name: usize,
+    name: u32,
     depth: Option<NonZeroUsize>,
 }
 
@@ -87,7 +90,6 @@ pub struct Compiler<'a> {
     source: &'a str,
     input: &'a [Lexeme],
     vm: &'a mut VM,
-    interner: &'a mut Interner,
     current: usize,
 
     locals: Vec<Local>,
@@ -96,17 +98,11 @@ pub struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(
-        input: &'a [Lexeme],
-        vm: &'a mut VM,
-        interner: &'a mut Interner,
-        source: &'a str,
-    ) -> Self {
+    pub fn new(input: &'a [Lexeme], vm: &'a mut VM, source: &'a str) -> Self {
         Self {
             source,
             input,
             vm,
-            interner,
             current: 0,
             locals: Vec::new(),
             local_count: 0,
@@ -124,6 +120,8 @@ impl<'a> Compiler<'a> {
             ParseFn::String => self.string(),
             ParseFn::Variable => self.variable(can_assign),
             ParseFn::None => unreachable!(),
+            ParseFn::And => self.and(),
+            ParseFn::Or => self.or(),
         }
     }
 
@@ -159,6 +157,18 @@ impl<'a> Compiler<'a> {
                 self.advance()?;
                 self.print_stmt()
             }
+            Token::IF => {
+                self.advance()?;
+                self.if_stmt()
+            }
+            Token::WHILE => {
+                self.advance()?;
+                self.while_stmt()
+            }
+            Token::FOR => {
+                self.advance()?;
+                self.for_stmt()
+            }
             Token::LEFT_BRACE => {
                 self.advance()?;
                 self.begin_scope();
@@ -182,6 +192,82 @@ impl<'a> Compiler<'a> {
         self.expression()?;
         self.consume(Token::SEMICOLON)?;
         self.emit_instruction(OpCode::OP_PRINT);
+        Ok(())
+    }
+
+    fn if_stmt(&mut self) -> Result<()> {
+        self.consume(Token::LEFT_PAREN)?;
+        self.expression()?;
+        self.consume(Token::RIGHT_PAREN)?;
+
+        let then_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
+        self.emit_instruction(OpCode::OP_POP);
+        self.statement()?;
+
+        let else_jump = self.emit_jump(OpCode::OP_JUMP(0));
+
+        self.patch_jump(then_jump);
+        self.emit_instruction(OpCode::OP_POP);
+        if self.match_advance(Token::ELSE)? {
+            self.statement()?;
+        }
+        self.patch_jump(else_jump);
+
+        Ok(())
+    }
+
+    fn while_stmt(&mut self) -> Result<()> {
+        let loop_start = self.vm.instructions.len();
+        self.consume(Token::LEFT_PAREN)?;
+        self.expression()?;
+        self.consume(Token::RIGHT_PAREN)?;
+        let exit_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
+        self.emit_instruction(OpCode::OP_POP);
+        self.statement()?;
+        self.emit_loop(loop_start);
+        self.patch_jump(exit_jump);
+        self.emit_instruction(OpCode::OP_POP);
+        Ok(())
+    }
+
+    fn for_stmt(&mut self) -> Result<()> {
+        self.begin_scope();
+        self.consume(Token::LEFT_PAREN)?;
+        if self.match_advance(Token::SEMICOLON)? {
+        } else if self.match_advance(Token::VAR)? {
+            self.var_stmt()?;
+        } else {
+            self.expression_stmt()?;
+        }
+        let mut loop_start = self.vm.instructions.len();
+
+        let mut exit_jump = None;
+        if !self.match_advance(Token::SEMICOLON)? {
+            self.expression()?;
+            self.consume(Token::SEMICOLON)?;
+
+            exit_jump = Some(self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0)));
+            self.emit_instruction(OpCode::OP_POP);
+        }
+
+        if !self.match_advance(Token::RIGHT_PAREN)? {
+            let body_jump = self.emit_jump(OpCode::OP_JUMP(0));
+            let inc_start = self.vm.instructions.len();
+            self.expression()?;
+            self.emit_instruction(OpCode::OP_POP);
+            self.consume(Token::RIGHT_PAREN)?;
+            self.emit_loop(loop_start);
+            loop_start = inc_start;
+            self.patch_jump(body_jump);
+        }
+        self.statement()?;
+        self.emit_loop(loop_start);
+        if let Some(v) = exit_jump {
+            self.patch_jump(v);
+            self.emit_instruction(OpCode::OP_POP);
+        }
+        self.end_scope();
+
         Ok(())
     }
 
@@ -219,27 +305,26 @@ impl<'a> Compiler<'a> {
     }
 
     fn number(&mut self) -> Result<()> {
-        let Lexeme {
-            ty: Token::NUMBER,
-            line_n: _,
-            start,
-            end,
-        } = &self.input[self.current - 1]
-        else {
-            unreachable!()
+        match &self.input[self.current - 1] {
+            x @ Lexeme {
+                ty: Token::NUMBER, ..
+            } => {
+                let bytes = x.find(self.source).as_bytes();
+                let value = lexical_core::parse::<f64>(bytes).map_err(|_| CompileTimeError {
+                    source_code: self.source.into(),
+                    err_span: x.into(),
+                    advice: format!(
+                        "could not parse \"{}\" as number!",
+                        str::from_utf8(bytes).unwrap()
+                    ),
+                })?;
+
+                self.emit_value(Value::Number(value));
+            }
+            _ => unreachable!(),
         };
 
-        let bytes = &self.source.as_bytes()[*start..*end];
-        let value = lexical_core::parse::<f64>(bytes).map_err(|_| CompileTimeError {
-            source_code: self.source.into(),
-            err_span: (*start..*end).into(),
-            advice: format!(
-                "could not parse \"{}\" as number!",
-                str::from_utf8(bytes).unwrap()
-            ),
-        })?;
-
-        self.emit_value(Value::Number(value));
+        // let bytes =
 
         Ok(())
     }
@@ -247,17 +332,13 @@ impl<'a> Compiler<'a> {
     fn string(&mut self) -> Result<()> {
         let Lexeme {
             ty: Token::STRING,
-            line_n: _,
-            start,
-            end,
+            symbol,
+            ..
         } = &self.input[self.current - 1]
         else {
             unreachable!()
         };
-
-        let value = &self.source[*start..*end];
-        let value = self.interner.intern(value.to_owned());
-        self.emit_value(Value::Symbol(value));
+        self.emit_value(Value::Symbol(symbol.unwrap().get()));
 
         Ok(())
     }
@@ -353,21 +434,39 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn resolve_local(&mut self, name: usize) -> Result<Option<usize>> {
+    fn and(&mut self) -> Result<()> {
+        let end_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
+        self.emit_instruction(OpCode::OP_POP);
+        self.parse_precedence(Precedence::PREC_AND)?;
+        self.patch_jump(end_jump);
+        Ok(())
+    }
+
+    fn or(&mut self) -> Result<()> {
+        let else_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
+        let end_jump = self.emit_jump(OpCode::OP_JUMP(0));
+
+        self.patch_jump(else_jump);
+        self.emit_instruction(OpCode::OP_POP);
+        self.parse_precedence(Precedence::PREC_OR)?;
+        self.patch_jump(end_jump);
+        Ok(())
+    }
+
+    fn resolve_local(&mut self, name: u32) -> Result<Option<u32>> {
         for i in (0..self.local_count).rev() {
             let local = &self.locals[i];
             if name == local.name {
-                dbg!(local);
                 if local.depth.is_none() {
-                    let last = self.input[self.current - 1];
+                    let last = &self.input[self.current - 1];
                     return Err(CompileTimeError {
                         advice: "can't read local variable in its own initialiser!".into(),
                         source_code: self.source.into(),
-                        err_span: (last.start..last.end).into(),
+                        err_span: last.into(),
                     }
                     .into());
                 }
-                return Ok(Some(i));
+                return Ok(Some(i as u32));
             }
         }
         Ok(None)
@@ -380,7 +479,7 @@ impl<'a> Compiler<'a> {
         if matches!(prefix_rule, ParseFn::None) {
             return Err(CompileTimeError {
                 source_code: self.source.into(),
-                err_span: (last.start..last.end).into(),
+                err_span: last.into(),
                 advice: "expected an expression!".into(),
             }
             .into());
@@ -398,7 +497,7 @@ impl<'a> Compiler<'a> {
             if matches!(infix_rule, ParseFn::None) {
                 return Err(CompileTimeError {
                     source_code: self.source.into(),
-                    err_span: (last.start..last.end).into(),
+                    err_span: last.into(),
                     advice: "expected an expression!".into(),
                 }
                 .into());
@@ -408,7 +507,7 @@ impl<'a> Compiler<'a> {
             if can_assign && self.check(Token::EQUAL) {
                 return Err(CompileTimeError {
                     source_code: self.source.into(),
-                    err_span: (last.start..last.end).into(),
+                    err_span: last.into(),
                     advice: "this is an invalid assignment target!".into(),
                 }
                 .into());
@@ -418,13 +517,13 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn parse_variable_name(&mut self) -> Result<usize> {
+    fn parse_variable_name(&mut self) -> Result<u32> {
         self.consume(Token::IDENTIFIER)?;
         self.declare_variable()?;
-        match self.scope_depth > 0 {
-            true => Ok(0),
-            false => self.identifier_constant(&self.input[self.current - 1]),
-        }
+        Ok(match self.scope_depth > 0 {
+            true => 0,
+            false => self.input[self.current - 1].symbol.unwrap().get(),
+        })
     }
 
     fn mark_initialised(&mut self) {
@@ -443,12 +542,12 @@ impl<'a> Compiler<'a> {
                 Some(d) if d.get() < self.scope_depth => break,
                 Some(_) | None => {
                     if name == local.name {
-                        let last = self.input[self.current - 1];
+                        let last = &self.input[self.current - 1];
                         return Err(CompileTimeError {
                             advice: "there already exists a variable with this name in this scope."
                                 .into(),
                             source_code: self.source.into(),
-                            err_span: (last.start..last.end).into(),
+                            err_span: last.into(),
                         }
                         .into());
                     }
@@ -460,18 +559,10 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn add_local(&mut self, name: usize) {
+    fn add_local(&mut self, name: u32) {
         self.locals.push(Local { name, depth: None });
         // local.depth = NonZero::new(self.scope_depth);
         self.local_count += 1;
-    }
-
-    fn identifier_constant(&mut self, token: &Lexeme) -> Result<usize> {
-        let range = token.start..token.end;
-        let name = &self.source[range];
-
-        let name = self.interner.intern(name.to_owned());
-        Ok(name)
     }
 
     fn check(&mut self, token: Token) -> bool {
@@ -480,6 +571,14 @@ impl<'a> Compiler<'a> {
             return true;
         }
         false
+    }
+
+    fn match_advance(&mut self, token: Token) -> Result<bool> {
+        if self.check(token) {
+            self.consume(token)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn consume(&mut self, token: Token) -> Result<&Lexeme> {
@@ -491,7 +590,7 @@ impl<'a> Compiler<'a> {
         Err(CompileTimeError {
             advice: format!("A token of type '{:?}' was not found!", token),
             source_code: self.source.into(),
-            err_span: (curr.start..curr.end).into(),
+            err_span: curr.into(),
         }
         .into())
     }
@@ -502,12 +601,12 @@ impl<'a> Compiler<'a> {
 
     fn emit_instruction(&mut self, instruction: OpCode) {
         self.vm
-            .add_instruction(instruction, self.input[self.current - 1].line_n);
+            .add_instruction(instruction, self.input[self.current - 1].line_n as usize);
     }
 
     fn emit_value(&mut self, value: Value) {
         let v = self.add_constant(value);
-        self.emit_instruction(OpCode::OP_CONSTANT(v));
+        self.emit_instruction(OpCode::OP_CONSTANT(v as u32));
     }
 
     fn begin_scope(&mut self) {
@@ -532,9 +631,26 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn get_last_as_interned(&mut self) -> usize {
-        let last = &self.input[self.current - 1];
-        let name = &self.source[last.start..last.end];
-        self.interner.intern(name.to_owned())
+    fn get_last_as_interned(&mut self) -> u32 {
+        self.input[self.current - 1].symbol.unwrap().get()
+    }
+
+    fn emit_jump(&mut self, instruction: OpCode) -> usize {
+        self.emit_instruction(instruction);
+        self.vm.instructions.len() - 1
+    }
+
+    fn patch_jump(&mut self, offset: usize) {
+        let jump = self.vm.instructions.len() - 1 - offset;
+        self.vm.instructions[offset] = match self.vm.instructions[offset] {
+            OpCode::OP_JUMP_IF_FALSE(_) => OpCode::OP_JUMP_IF_FALSE(jump as u32),
+            OpCode::OP_JUMP(_) => OpCode::OP_JUMP(jump as u32),
+            _ => unreachable!(),
+        }
+    }
+
+    fn emit_loop(&mut self, loop_start: usize) {
+        let off_set = self.vm.instructions.len() + 1 - loop_start;
+        self.emit_instruction(OpCode::OP_LOOP(off_set as u32));
     }
 }

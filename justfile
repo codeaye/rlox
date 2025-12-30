@@ -1,10 +1,13 @@
 alias br := showcase
 alias d := debug
+alias b := bacon
 
 set quiet := true
 
 debug:
-    cargo run -- test.sel
+    cargo run -- ./test.sel
+bacon:
+    bacon
 showcase:
     just build && time ./target/release/selena test.sel
 build:
