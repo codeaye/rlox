@@ -1,8 +1,6 @@
-use std::num::NonZero;
-
 use rustc_hash::FxHashMap;
 
-use crate::{typedef::StringRef, vm::Value};
+use crate::vm::Value;
 
 // change to struct and add marked for gc
 #[derive(Clone, Debug)]
@@ -19,12 +17,12 @@ impl Arena {
         }
     }
 
-    pub fn alloc_string(&mut self, obj: String) -> StringRef {
+    pub fn alloc_string(&mut self, obj: String) -> u32 {
         self.strings.push(obj);
-        NonZero::new(self.strings.len() as u32).unwrap()
+        (self.strings.len() - 1) as u32
     }
 
     pub fn get_string(&self, id: u32) -> &str {
-        &self.strings[(id - 1) as usize]
+        &self.strings[id as usize]
     }
 }

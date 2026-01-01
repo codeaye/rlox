@@ -1,7 +1,4 @@
-use std::{
-    num::{NonZero, NonZeroU32},
-    ops::Range,
-};
+use std::{num::NonZeroU32, ops::Range};
 
 use miette::SourceSpan;
 
@@ -39,17 +36,11 @@ pub struct Lexeme {
     pub line_n: u32,
     pub start: u32,
     pub len: u16,
-    pub symbol: Option<StringRef>,
+    pub symbol: ZeroOptU32,
 }
 
 impl Lexeme {
-    pub fn new(
-        ty: Token,
-        line_n: u32,
-        start: usize,
-        end: usize,
-        symbol: Option<StringRef>,
-    ) -> Self {
+    pub fn new(ty: Token, line_n: u32, start: usize, end: usize, symbol: ZeroOptU32) -> Self {
         Self {
             ty,
             line_n,
@@ -73,8 +64,6 @@ impl From<&Lexeme> for SourceSpan {
         SourceSpan::from((val.start as usize, val.len as usize))
     }
 }
-
-pub type StringRef = NonZero<u32>;
 
 #[allow(non_camel_case_types)]
 #[repr(u8)]
@@ -114,16 +103,17 @@ impl Precedence {
 #[derive(Debug)]
 pub struct Local {
     pub(crate) name: u32,
-    depth: Option<NonZeroU32>,
+    depth: ZeroOptU32,
 }
 
 impl Local {
+    #[inline(always)]
     pub fn get_depth(&self) -> Option<u32> {
-        self.depth.map(|v| v.get() - 1)
+        self.depth.get()
     }
-
+    #[inline(always)]
     pub fn set_depth(&mut self, val: u32) {
-        self.depth = NonZeroU32::new(val + 1);
+        self.depth = ZeroOptU32::new(val);
     }
 }
 
@@ -158,7 +148,10 @@ impl ScopeManager {
     }
 
     pub fn add_uninitialised_local(&mut self, name: u32) {
-        self.locals.push(Local { name, depth: None });
+        self.locals.push(Local {
+            name,
+            depth: ZeroOptU32::none(),
+        });
         self.local_count += 1;
     }
 
@@ -212,5 +205,57 @@ pub fn parse_token_to_rule(token: Token) -> ParseRule {
         AND => (None, And, PREC_AND),
         OR => (None, Or, PREC_OR),
         _ => (None, None, PREC_NONE),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(transparent)]
+pub struct ZeroOptU32(Option<NonZeroU32>);
+
+impl ZeroOptU32 {
+    #[inline(always)]
+    pub fn new(value: u32) -> Self {
+        if value == u32::MAX {
+            panic!("value too large for ZeroOptU32");
+        }
+        Self(Some(NonZeroU32::new(value + 1).unwrap()))
+    }
+
+    #[inline(always)]
+    pub const fn none() -> Self {
+        Self(None)
+    }
+
+    #[inline(always)]
+    pub fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+
+    #[inline(always)]
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
+    #[inline(always)]
+    pub fn get(&self) -> Option<u32> {
+        self.0.map(|nz| nz.get() - 1)
+    }
+
+    #[inline(always)]
+    pub fn unwrap(&self) -> u32 {
+        self.get().expect("ZeroOptU32 is None")
+    }
+
+    #[inline(always)]
+    pub fn set(&mut self, value: u32) {
+        if value == u32::MAX {
+            panic!("value too large for ZeroOptU32");
+        }
+        self.0 = Some(NonZeroU32::new(value + 1).unwrap());
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.0 = None;
     }
 }

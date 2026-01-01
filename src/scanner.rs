@@ -5,7 +5,7 @@ use miette::Result;
 use crate::{
     errors::CompileTimeError,
     interner::Interner,
-    typedef::{Lexeme, Token},
+    typedef::{Lexeme, Token, ZeroOptU32},
 };
 
 #[derive(Default, Debug)]
@@ -47,14 +47,17 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    #[inline(always)]
     fn at_end(&self) -> bool {
         self.cursor.end >= self.source.len()
     }
 
+    #[inline(always)]
     fn peek(&self) -> u8 {
         self.source.get(self.cursor.end).copied().unwrap_or(b'\0')
     }
 
+    #[inline(always)]
     fn peek_next(&self) -> u8 {
         self.source
             .get(self.cursor.end + 1)
@@ -62,12 +65,14 @@ impl<'a> Scanner<'a> {
             .unwrap_or(b'\0')
     }
 
+    #[inline(always)]
     fn advance(&mut self) -> u8 {
         let curr = self.source.get(self.cursor.end).copied().unwrap_or(b'\0');
         self.cursor.advance();
         curr
     }
 
+    #[inline(always)]
     fn match_next(&mut self, expected: u8) -> bool {
         match self.peek() == expected {
             true => {
@@ -78,23 +83,25 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    #[inline(always)]
     fn make_token(&self, ty: Token) -> Option<Result<Lexeme>> {
         Some(Ok(Lexeme::new(
             ty,
             self.line,
             self.cursor.start,
             self.cursor.end,
-            None,
+            ZeroOptU32::none(),
         )))
     }
 
+    #[inline(always)]
     fn make_token_with_symbol(&mut self, ty: Token) -> Option<Result<Lexeme>> {
         Some(Ok(Lexeme::new(
             ty,
             self.line,
             self.cursor.start,
             self.cursor.end,
-            Some(self.interner.intern(self.cursor.start..self.cursor.end)),
+            ZeroOptU32::new(self.interner.intern(self.cursor.start..self.cursor.end)),
         )))
     }
 
@@ -245,7 +252,7 @@ impl<'a> Iterator for Scanner<'a> {
                         self.line,
                         self.cursor.start,
                         self.cursor.end,
-                        Some(
+                        ZeroOptU32::new(
                             self.interner
                                 .intern(self.cursor.start + 1..self.cursor.end - 1),
                         ),

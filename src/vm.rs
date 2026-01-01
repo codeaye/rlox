@@ -1,4 +1,4 @@
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use std::{borrow::Cow, fmt::Debug};
 
 use crate::{arena::Arena, errors::RuntimeError, interner::Interner};
@@ -126,17 +126,20 @@ impl VM {
         })
     }
 
+    #[inline(always)]
     pub fn read_instruction(&mut self) -> &OpCode {
         let old = &self.instructions[self.ip];
         self.ip += 1;
         old
     }
 
+    #[inline(always)]
     pub fn add_value(&mut self, value: Value) -> usize {
         self.values.push(value);
         self.values.len() - 1
     }
 
+    #[inline(always)]
     pub fn line_for_ip(&self, ip: usize) -> usize {
         let idx = self
             .lines
@@ -146,7 +149,7 @@ impl VM {
         self.lines[idx].line
     }
 
-    pub fn run(&mut self, interner: &Interner) -> Result<()> {
+    pub fn run<T: std::io::Write>(&mut self, interner: &Interner, writer: &mut T) -> Result<()> {
         while self.ip < self.instructions.len() {
             // #[cfg(debug_assertions)]
             // {
@@ -198,7 +201,7 @@ impl VM {
                             c.push_str(&a);
                             c.push_str(&b);
 
-                            Value::Str(self.arena.alloc_string(c).get())
+                            Value::Str(self.arena.alloc_string(c))
                         }
                         _ => Value::Number(a.as_number(line)? + b.as_number(line)?),
                     });
@@ -212,10 +215,12 @@ impl VM {
                 OP_LESS => binop!(self.stack, Bool, <),
                 OP_GREATER_EQUAL => binop!(self.stack, Bool, >=),
                 OP_LESS_EQUAL => binop!(self.stack, Bool, <=),
-                OP_PRINT => println!(
+                OP_PRINT => writeln!(
+                    writer,
                     "{}",
                     self.stack.pop().unwrap().as_string(interner, &self.arena)
-                ),
+                )
+                .into_diagnostic()?,
                 OP_POP => {
                     let _ = self.stack.pop();
                 }

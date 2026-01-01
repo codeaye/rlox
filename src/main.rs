@@ -19,6 +19,20 @@ use crate::{
     compiler::Compiler, errors::ProcessError, interner::Interner, scanner::Scanner, vm::VM,
 };
 
+pub fn compile<T: Write>(source_str: &str, writer: &mut T) -> Result<()> {
+    let source: Arc<str> = Arc::from(source_str);
+    let bytes = source.as_bytes();
+
+    let mut interner = Interner::new(source.clone());
+    let mut vm = VM::new();
+    let mut binding = Scanner::new(bytes, source.clone(), &mut interner);
+    let mut compiler = Compiler::new(&mut binding, source.clone(), &mut vm)?;
+    compiler.compile()?;
+    vm.run(&interner, writer)?;
+
+    Ok(())
+}
+
 fn read_input(prompt: &str, buf: &mut Vec<u8>) -> Result<(), std::io::Error> {
     buf.clear();
     print!("{prompt}");
@@ -30,23 +44,6 @@ fn read_input(prompt: &str, buf: &mut Vec<u8>) -> Result<(), std::io::Error> {
 
 fn read_file(path: PathBuf, buf: &mut Vec<u8>) -> Result<(), std::io::Error> {
     File::open(path)?.read_to_end(buf)?;
-    Ok(())
-}
-
-fn compile(source_str: &str) -> Result<()> {
-    let source: Arc<str> = Arc::from(source_str);
-    let bytes = source.as_bytes();
-
-    // println!("{:#?}", scanner.output);
-
-    let mut interner = Interner::new(source.clone());
-    let mut vm = VM::new();
-    let mut binding = Scanner::new(bytes, source.clone(), &mut interner);
-    let mut compiler = Compiler::new(&mut binding, source.clone(), &mut vm)?;
-    compiler.compile()?;
-    vm.run(&interner)?;
-    // #[cfg(debug_assertions)]
-    // vm.debug(&interner);
     Ok(())
 }
 
@@ -62,7 +59,7 @@ fn main() -> Result<()> {
             let source_str = std::str::from_utf8(&buf).map_err(|_| ProcessError {
                 advice: "invalid source provided as input!".into(),
             })?;
-            compile(source_str)?;
+            compile(source_str, &mut stdout())?
         } else {
             return Err(ProcessError {
                 advice: format!("the file \"{}\" does not exist!", path_loc),
@@ -80,7 +77,7 @@ fn main() -> Result<()> {
             let source_str = std::str::from_utf8(&buf).map_err(|_| ProcessError {
                 advice: "invalid source provided as input!".into(),
             })?;
-            compile(source_str)?;
+            compile(source_str, &mut stdout())?;
         }
     }
 

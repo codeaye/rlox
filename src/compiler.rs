@@ -1,7 +1,7 @@
 use crate::{
     errors::CompileTimeError,
     scanner::Scanner,
-    typedef::{Lexeme, ParseFn, Precedence, ScopeManager, Token, parse_token_to_rule},
+    typedef::{Lexeme, ParseFn, Precedence, ScopeManager, Token, ZeroOptU32, parse_token_to_rule},
     vm::{OpCode, VM, Value},
 };
 use miette::Result;
@@ -31,6 +31,7 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    #[inline(always)]
     fn parsefn_tofn(&mut self, rule: ParseFn, can_assign: bool) -> Result<()> {
         match rule {
             ParseFn::Grouping => self.grouping(),
@@ -52,17 +53,22 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn get_current(&self) -> &Lexeme {
         self.current.as_ref().expect("compiler invarient")
     }
+
+    #[inline(always)]
     pub fn get_last(&self) -> &Lexeme {
         self.last.as_ref().expect("compiler invarient")
     }
 
+    #[inline(always)]
     pub fn check(&mut self, token: Token) -> bool {
         matches!(self.current, Some(v) if v.ty == token)
     }
 
+    #[inline(always)]
     pub fn match_advance(&mut self, token: Token) -> Result<bool> {
         if self.check(token) {
             self.consume(token)?;
@@ -71,6 +77,7 @@ impl<'a> Compiler<'a> {
         Ok(false)
     }
 
+    #[inline(always)]
     fn consume(&mut self, token: Token) -> Result<&Lexeme> {
         let current = self.get_current();
         if current.ty != token {
@@ -293,7 +300,7 @@ impl<'a> Compiler<'a> {
         else {
             unreachable!()
         };
-        self.emit_value(Value::Symbol(symbol.unwrap().get()));
+        self.emit_value(Value::Symbol(symbol.unwrap()));
 
         Ok(())
     }
@@ -364,7 +371,7 @@ impl<'a> Compiler<'a> {
 
         let arg = self.resolve_local(name)?;
         let (get_op, set_op);
-        match arg {
+        match arg.get() {
             None => {
                 get_op = OpCode::OP_GET_GLOBAL(name);
                 set_op = OpCode::OP_SET_GLOBAL(name)
@@ -408,7 +415,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn resolve_local(&mut self, name: u32) -> Result<Option<u32>> {
+    fn resolve_local(&mut self, name: u32) -> Result<ZeroOptU32> {
         for i in (0..self.local_manager.local_count).rev() {
             let local = &self.local_manager.locals[i];
             if name == local.name {
@@ -421,10 +428,10 @@ impl<'a> Compiler<'a> {
                     }
                     .into());
                 }
-                return Ok(Some(i as u32));
+                return Ok(ZeroOptU32::new(i as u32));
             }
         }
-        Ok(None)
+        Ok(ZeroOptU32::none())
     }
 
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
@@ -482,10 +489,11 @@ impl<'a> Compiler<'a> {
         self.declare_variable()?;
         Ok(match self.local_manager.scope_depth > 0 {
             true => 0,
-            false => self.get_last().symbol.unwrap().get(),
+            false => self.get_last().symbol.unwrap(),
         })
     }
 
+    #[inline(always)]
     fn mark_initialised(&mut self) {
         self.local_manager.mark_initialised()
     }
@@ -519,20 +527,24 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    #[inline(always)]
     fn add_constant(&mut self, value: Value) -> usize {
         self.vm.add_value(value)
     }
 
+    #[inline(always)]
     fn emit_instruction(&mut self, instruction: OpCode) {
         self.vm
             .add_instruction(instruction, self.get_last().line_n as usize);
     }
 
+    #[inline(always)]
     fn emit_value(&mut self, value: Value) {
         let v = self.add_constant(value);
         self.emit_instruction(OpCode::OP_CONSTANT(v as u32))
     }
 
+    #[inline(always)]
     fn begin_scope(&mut self) {
         self.local_manager.begin_scope();
     }
@@ -558,10 +570,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    #[inline(always)]
     fn get_last_as_interned(&mut self) -> u32 {
-        self.get_last().symbol.unwrap().get()
+        self.get_last().symbol.unwrap()
     }
 
+    #[inline(always)]
     fn emit_jump(&mut self, instruction: OpCode) -> usize {
         self.emit_instruction(instruction);
         self.vm.instructions.len() - 1
@@ -576,6 +590,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    #[inline(always)]
     fn emit_loop(&mut self, loop_start: usize) {
         let off_set = self.vm.instructions.len() + 1 - loop_start;
         self.emit_instruction(OpCode::OP_LOOP(off_set as u32))

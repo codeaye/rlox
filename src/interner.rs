@@ -1,8 +1,6 @@
-use std::{num::NonZero, ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 use rustc_hash::FxHashMap;
-
-use crate::typedef::StringRef;
 
 #[derive(Debug, Clone)]
 pub struct Interner {
@@ -19,17 +17,17 @@ impl Interner {
         }
     }
 
-    pub fn intern(&mut self, range: Range<usize>) -> StringRef {
+    pub fn intern(&mut self, range: Range<usize>) -> u32 {
         let slice = &self.source[range.clone()];
         let slice_static: &'static str = unsafe { std::mem::transmute(slice) };
 
         if let Some(&id) = self.map.get(slice_static) {
-            NonZero::new(id).unwrap()
+            id
         } else {
-            self.ids.push(range);
             let id = self.ids.len() as u32;
+            self.ids.push(range);
             self.map.insert(slice_static, id);
-            NonZero::new(id).unwrap()
+            id
         }
     }
 

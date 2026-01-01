@@ -14,7 +14,7 @@ bacon:
 showcase:
     just build && time ./target/release/selena test.sel
 build:
-    cargo build --release --quiet > log
+    cargo build --release
 run:
     ./target/release/selena test.sel
 flame:
