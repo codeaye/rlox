@@ -3,6 +3,7 @@ mod compiler;
 mod errors;
 mod interner;
 mod scanner;
+mod typedef;
 mod vm;
 
 use miette::{IntoDiagnostic, Result};
@@ -11,6 +12,7 @@ use std::{
     fs::File,
     io::{BufRead, Read, Write, stdin, stdout},
     path::PathBuf,
+    sync::Arc,
 };
 
 use crate::{
@@ -32,16 +34,16 @@ fn read_file(path: PathBuf, buf: &mut Vec<u8>) -> Result<(), std::io::Error> {
 }
 
 fn compile(source_str: &str) -> Result<()> {
-    let mut interner = Interner::new();
-    let mut scanner = Scanner::new(source_str, &mut interner);
-    scanner.scan()?;
+    let source: Arc<str> = Arc::from(source_str);
+    let bytes = source.as_bytes();
+
     // println!("{:#?}", scanner.output);
+
+    let mut interner = Interner::new(source.clone());
     let mut vm = VM::new();
-    let mut compiler = Compiler::new(&scanner.output, &mut vm, source_str);
+    let mut binding = Scanner::new(bytes, source.clone(), &mut interner);
+    let mut compiler = Compiler::new(&mut binding, source.clone(), &mut vm)?;
     compiler.compile()?;
-    #[cfg(debug_assertions)]
-    vm.debug(&interner);
-    dbg!(&interner);
     vm.run(&interner)?;
     // #[cfg(debug_assertions)]
     // vm.debug(&interner);
@@ -75,35 +77,10 @@ fn main() -> Result<()> {
             read_input("> ", &mut new).into_diagnostic()?;
             buf_clone.append(&mut new);
 
-            let source_str = std::str::from_utf8(&buf_clone).map_err(|_| ProcessError {
+            let source_str = std::str::from_utf8(&buf).map_err(|_| ProcessError {
                 advice: "invalid source provided as input!".into(),
             })?;
-            let mut interner: Interner = Interner::new();
-
-            let mut scanner = Scanner::new(source_str, &mut interner);
-            if let Err(e) = scanner.scan() {
-                println!("{:?}", e);
-                println!("-> Reverting to state from previous command");
-                continue;
-            };
-
-            let mut vm = VM::new();
-
-            let mut compiler = Compiler::new(&scanner.output, &mut vm, source_str);
-
-            if let Err(e) = compiler.compile() {
-                println!("{:?}", e);
-                println!("-> Reverting to state from previous command");
-                continue;
-            };
-
-            if let Err(e) = vm.run(&interner) {
-                println!("{:?}", e);
-                println!("-> Reverting to state from previous command");
-                continue;
-            }
-
-            buf = buf_clone
+            compile(source_str)?;
         }
     }
 

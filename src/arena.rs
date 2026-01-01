@@ -2,11 +2,10 @@ use std::num::NonZero;
 
 use rustc_hash::FxHashMap;
 
-use crate::vm::Value;
+use crate::{typedef::StringRef, vm::Value};
 
-pub type StringRef = NonZero<u32>;
 // change to struct and add marked for gc
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Arena {
     pub strings: Vec<String>,
     pub globals: FxHashMap<u32, Value>,

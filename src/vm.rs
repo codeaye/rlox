@@ -38,13 +38,6 @@ pub enum OpCode {
     OP_LOOP(u32),
 }
 
-impl OpCode {
-    #[cfg(debug_assertions)]
-    pub fn is_simple(&self) -> bool {
-        !matches!(self, OpCode::OP_CONSTANT(_))
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     Number(f64),
@@ -98,7 +91,7 @@ pub struct LineInfo {
 #[derive(Clone)]
 pub struct VM {
     ip: usize,
-    arena: Arena,
+    pub(crate) arena: Arena,
     stack: Vec<Value>,
     pub(crate) instructions: Vec<OpCode>,
     values: Vec<Value>,
@@ -153,22 +146,27 @@ impl VM {
         self.lines[idx].line
     }
 
-    // pub fn peek_value(&self, distance: usize) -> &Value {
-    //     &self.values[self.values.len() - 1 - distance]
-    // }
-
     pub fn run(&mut self, interner: &Interner) -> Result<()> {
         while self.ip < self.instructions.len() {
+            // #[cfg(debug_assertions)]
+            // {
+            //     self.debug(interner);
+            //     std::thread::sleep(std::time::Duration::from_millis(
+            //         std::env::args().collect::<Vec<String>>()[2]
+            //             .parse::<u64>()
+            //             .unwrap_or(0),
+            //     ));
+            // }
             let instruction = *self.read_instruction();
             let line = self.line_for_ip(self.ip);
 
             macro_rules! binop {
-            ($stack:expr, $wrap:ident, $op:tt) => {{
-                let a = $stack.pop().unwrap().as_number(line)?;
-                let b = $stack.pop().unwrap().as_number(line)?;
-                $stack.push(Value::$wrap(b $op a));
-            }};
-        }
+                ($stack:expr, $wrap:ident, $op:tt) => {{
+                    let a = $stack.pop().unwrap().as_number(line)?;
+                    let b = $stack.pop().unwrap().as_number(line)?;
+                    $stack.push(Value::$wrap(b $op a));
+                }};
+            }
 
             use self::{OpCode::*, Value::*};
             match instruction {
@@ -190,7 +188,6 @@ impl VM {
                 OP_ADD => {
                     let b = self.stack.pop().unwrap();
                     let a = self.stack.pop().unwrap();
-
                     self.stack.push(match (a, b) {
                         (Symbol(_), _) | (Str(_), _) => {
                             let (a, b) = (
@@ -237,7 +234,7 @@ impl VM {
                         })?)
                 }
                 OP_SET_GLOBAL(v) => {
-                    let value = self.stack.pop().unwrap();
+                    let value = self.stack.last().unwrap();
                     let key = self.arena.globals.get_mut(&v);
 
                     let Some(key) = key else {
@@ -251,7 +248,7 @@ impl VM {
                         .into());
                     };
 
-                    *key = value
+                    *key = *value
                 }
                 OP_SET_LOCAL(slot) => self.stack[slot as usize] = *self.stack.last().unwrap(),
                 OP_GET_LOCAL(slot) => self.stack.push(self.stack[slot as usize]),
@@ -272,54 +269,111 @@ impl VM {
 #[cfg(debug_assertions)]
 impl VM {
     pub fn debug(&self, interner: &Interner) {
-        println!("Stack: {:?}", self.stack);
-        println!("Values: ");
+        print!("\x1B[2J\x1B[H");
+        use std::io::{self, Write};
+        io::stdout().flush().unwrap();
+        use OpCode::*;
+        use Value::*;
 
-        for value in self.values.iter() {
-            println!(
-                "   {:?}: {}",
-                value,
-                match value {
-                    Value::Number(b) => b.to_string(),
-                    Value::Bool(v) => v.to_string(),
-                    Value::Null => "null".to_owned(),
-                    Value::Symbol(a) => interner.resolve(*a).to_string(),
-                    Value::Str(a) => self.arena.get_string(*a).to_string(),
-                }
-            )
-        }
+        println!("\n========== VM DEBUG ==========\n");
 
-        println!("Arena: ");
-
-        for (i, val) in self.arena.strings.iter().enumerate() {
-            println!("   {:?}: {}", i, val)
-        }
-
-        println!("Instructions:");
-
-        for (i, instruction) in self.instructions.iter().enumerate() {
-            print!("    ");
-            match instruction.is_simple() {
-                true => println!("{:0>4}L{:0>4} {:?} ", i, self.line_for_ip(i), instruction),
-                false => match instruction {
-                    v @ OpCode::OP_CONSTANT(x) => println!(
-                        "{:0>4}L{:0>4} {:?} -> {:?} ",
-                        i,
-                        self.line_for_ip(i),
-                        v,
-                        match self.values[*x as usize] {
-                            Value::Number(b) => b.to_string(),
-                            Value::Bool(v) => v.to_string(),
-                            Value::Null => "null".to_owned(),
-                            Value::Symbol(a) => interner.resolve(a).to_string(),
-                            Value::Str(a) => self.arena.get_string(a).to_string(),
-                        },
-                    ),
-                    _ => unreachable!(),
-                },
+        println!("Stack (top last):");
+        if self.stack.is_empty() {
+            println!("\n\n\n\n\n\n\n  <empty>");
+        } else {
+            for (i, v) in self.stack.iter().enumerate() {
+                println!("  [{:02}] {:?}", i, v);
             }
         }
 
-        println!()
+        println!("\nConstants:");
+        if self.values.is_empty() {
+            println!("  <none>");
+        } else {
+            for (i, v) in self.values.iter().enumerate() {
+                let rendered = match v {
+                    Number(n) => n.to_string(),
+                    Bool(b) => b.to_string(),
+                    Null => "null".into(),
+                    Symbol(s) => interner.resolve(*s).into(),
+                    Str(s) => self.arena.get_string(*s).into(),
+                };
+                println!("  #{:03} {:?} = {}", i, v, rendered);
+            }
+        }
+
+        println!("\nArena strings:");
+        if self.arena.strings.is_empty() {
+            println!("  <none>");
+        } else {
+            for (i, s) in self.arena.strings.iter().enumerate() {
+                println!("  @{i:03} \"{s}\"");
+            }
+        }
+
+        println!("\nInstructions:");
+        println!(" idx | line | ip→ | opcode                     | meaning");
+        println!("-----+------+-----+----------------------------+-------------------------------");
+
+        for (i, instr) in self.instructions.iter().enumerate() {
+            let line = self.line_for_ip(i);
+            let ip_marker = if i == self.ip { "▶" } else { " " };
+
+            print!(
+                "{:04} | {:04} |  {}  | {:<26} | ",
+                i,
+                line,
+                ip_marker,
+                format!("{instr:?}")
+            );
+
+            match *instr {
+                OP_RETURN => println!("halt execution, dump stack"),
+                OP_NEGATE => println!("pop number → push (-value)"),
+                OP_NOT => println!("pop value → push logical negation"),
+                OP_NULL => println!("push null"),
+                OP_TRUE => println!("push true"),
+                OP_FALSE => println!("push false"),
+                OP_CONSTANT(idx) => {
+                    let v = self.values[idx as usize];
+                    println!("push constant #{idx} ({v:?})");
+                }
+                OP_ADD => println!("pop a, pop b → push (b + a) or string concat"),
+                OP_SUBTRACT => println!("pop a, pop b → push (b - a)"),
+                OP_MULTIPLY => println!("pop a, pop b → push (b * a)"),
+                OP_DIVIDE => println!("pop a, pop b → push (b / a)"),
+                OP_EQUAL => println!("pop a, pop b → push (b == a)"),
+                OP_NOT_EQUAL => println!("pop a, pop b → push (b != a)"),
+                OP_GREATER => println!("pop a, pop b → push (b > a)"),
+                OP_LESS => println!("pop a, pop b → push (b < a)"),
+                OP_GREATER_EQUAL => println!("pop a, pop b → push (b ≥ a)"),
+                OP_LESS_EQUAL => println!("pop a, pop b → push (b ≤ a)"),
+                OP_PRINT => println!("pop value → print"),
+                OP_POP => println!("discard top of stack"),
+                OP_DEFINE_GLOBAL(sym) => {
+                    println!("pop value → define global '{}'", interner.resolve(sym))
+                }
+                OP_GET_GLOBAL(sym) => println!("push global '{}'", interner.resolve(sym)),
+                OP_SET_GLOBAL(sym) => {
+                    println!("pop value → assign global '{}'", interner.resolve(sym))
+                }
+                OP_GET_LOCAL(slot) => println!("push local slot {slot}"),
+                OP_SET_LOCAL(slot) => println!("assign local slot {slot} from top of stack"),
+                OP_JUMP_IF_FALSE(offset) => {
+                    let target = i + offset as usize;
+                    println!("if top is false → ip += {offset} (→ {target})");
+                }
+                OP_JUMP(offset) => {
+                    let target = i + offset as usize;
+                    println!("unconditional jump +{offset} (→ {target})");
+                }
+                OP_LOOP(offset) => {
+                    let target = i - offset as usize;
+                    println!("loop back −{offset} (→ {target})");
+                }
+            }
+        }
+
+        println!("\n========== END DEBUG ==========\n");
     }
 }

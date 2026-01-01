@@ -1,11 +1,14 @@
 alias br := showcase
 alias d := debug
+alias db := debugv
 alias b := bacon
 
 set quiet := true
 
 debug:
-    cargo run -- ./test.sel
+    cargo run -- ./test.sel 0
+debugv:
+    cargo run -- ./test.sel 0
 bacon:
     bacon
 showcase:

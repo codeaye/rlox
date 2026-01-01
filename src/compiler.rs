@@ -1,113 +1,34 @@
-use std::num::{NonZero, NonZeroUsize};
-
-use miette::Result;
-
 use crate::{
     errors::CompileTimeError,
-    scanner::{Lexeme, Token},
+    scanner::Scanner,
+    typedef::{Lexeme, ParseFn, Precedence, ScopeManager, Token, parse_token_to_rule},
     vm::{OpCode, VM, Value},
 };
-
-#[allow(non_camel_case_types)]
-pub enum Precedence {
-    PREC_NONE,
-    PREC_ASSIGNMENT, // =
-    PREC_OR,         // or
-    PREC_AND,        // and
-    PREC_EQUALITY,   // == !=
-    PREC_COMPARISON, // < > <= >=
-    PREC_TERM,       // + -
-    PREC_FACTOR,     // * /
-    PREC_UNARY,      // ! -
-    PREC_CALL,       // . ()
-    PREC_PRIMARY,
-}
-impl Precedence {
-    fn next_higher(&self) -> Self {
-        // for right-associated parsing
-        use Precedence::*;
-        match self {
-            PREC_NONE => PREC_ASSIGNMENT,
-            PREC_ASSIGNMENT => PREC_OR,
-            PREC_OR => PREC_AND,
-            PREC_AND => PREC_EQUALITY,
-            PREC_EQUALITY => PREC_COMPARISON,
-            PREC_COMPARISON => PREC_TERM,
-            PREC_TERM => PREC_FACTOR,
-            PREC_FACTOR => PREC_UNARY,
-            PREC_UNARY => PREC_CALL,
-            PREC_CALL => PREC_PRIMARY,
-            PREC_PRIMARY => PREC_PRIMARY,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ParseFn {
-    None,
-    Grouping,
-    Unary,
-    Binary,
-    Number,
-    String,
-    Literal,
-    Variable,
-    And,
-    Or,
-}
-
-// (prefix, infix, precedence)
-type ParseRule = (ParseFn, ParseFn, Precedence);
-
-fn parse_token_to_rule(token: &Token) -> ParseRule {
-    use self::{ParseFn::*, Precedence::*, Token::*};
-
-    match token {
-        LEFT_PAREN => (Grouping, None, PREC_NONE),
-        NUMBER => (Number, None, PREC_NONE),
-        STRING => (String, None, PREC_NONE),
-        MINUS => (Unary, Binary, PREC_TERM),
-        PLUS => (None, Binary, PREC_TERM),
-        SLASH | STAR => (None, Binary, PREC_FACTOR),
-        FALSE | TRUE | NULL => (Literal, None, PREC_NONE),
-        BANG => (Unary, None, PREC_UNARY),
-        BANG_EQUAL | EQUAL_EQUAL => (None, Binary, PREC_EQUALITY),
-        GREATER | GREATER_EQUAL | LESS | LESS_EQUAL => (None, Binary, PREC_COMPARISON),
-        IDENTIFIER => (Variable, None, PREC_NONE),
-        AND => (None, And, PREC_AND),
-        OR => (None, Or, PREC_OR),
-        _ => (None, None, PREC_NONE),
-    }
-}
-
-#[derive(Debug)]
-struct Local {
-    name: u32,
-    depth: Option<NonZeroUsize>,
-}
+use miette::Result;
+use std::sync::Arc;
 
 pub struct Compiler<'a> {
-    source: &'a str,
-    input: &'a [Lexeme],
+    scanner: &'a mut Scanner<'a>,
+    source: Arc<str>,
     vm: &'a mut VM,
-    current: usize,
 
-    locals: Vec<Local>,
-    local_count: usize,
-    scope_depth: usize,
+    last: Option<Lexeme>,
+    current: Option<Lexeme>,
+
+    pub local_manager: ScopeManager,
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(input: &'a [Lexeme], vm: &'a mut VM, source: &'a str) -> Self {
-        Self {
+    pub fn new(scanner: &'a mut Scanner<'a>, source: Arc<str>, vm: &'a mut VM) -> Result<Self> {
+        let current = scanner.next().transpose()?;
+        Ok(Self {
+            scanner,
+            local_manager: ScopeManager::new(),
             source,
-            input,
             vm,
-            current: 0,
-            locals: Vec::new(),
-            local_count: 0,
-            scope_depth: 0,
-        }
+            current,
+            last: None,
+        })
     }
 
     fn parsefn_tofn(&mut self, rule: ParseFn, can_assign: bool) -> Result<()> {
@@ -125,32 +46,65 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    pub fn advance(&mut self) -> Result<()> {
+        self.last = self.current;
+        self.current = self.scanner.next().transpose()?;
+        Ok(())
+    }
+
+    pub fn get_current(&self) -> &Lexeme {
+        self.current.as_ref().expect("compiler invarient")
+    }
+    pub fn get_last(&self) -> &Lexeme {
+        self.last.as_ref().expect("compiler invarient")
+    }
+
+    pub fn check(&mut self, token: Token) -> bool {
+        matches!(self.current, Some(v) if v.ty == token)
+    }
+
+    pub fn match_advance(&mut self, token: Token) -> Result<bool> {
+        if self.check(token) {
+            self.consume(token)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn consume(&mut self, token: Token) -> Result<&Lexeme> {
+        let current = self.get_current();
+        if current.ty != token {
+            return Err(CompileTimeError {
+                advice: format!("A token of type '{:?}' was not found!", token),
+                source_code: self.source.clone(),
+                err_span: current.into(),
+            }
+            .into());
+        }
+        self.advance()?;
+        Ok(self.get_last())
+    }
+
     pub fn compile(&mut self) -> Result<()> {
         while !self.check(Token::EOF) {
             self.declaration()?;
         }
-
         self.consume(Token::EOF)?;
         Ok(())
     }
 
-    fn advance(&mut self) -> Result<()> {
-        self.current += 1;
-        Ok(())
-    }
-
     fn declaration(&mut self) -> Result<()> {
-        match &self.input[self.current].ty {
+        match self.get_current().ty {
             Token::VAR => {
                 self.advance()?;
-                self.var_stmt()
+                self.var_declaration()
             }
             _ => self.statement(),
         }
     }
 
     fn statement(&mut self) -> Result<()> {
-        let curr = &self.input[self.current];
+        let curr = self.get_current();
 
         match curr.ty {
             Token::PRINT => {
@@ -235,13 +189,14 @@ impl<'a> Compiler<'a> {
         self.consume(Token::LEFT_PAREN)?;
         if self.match_advance(Token::SEMICOLON)? {
         } else if self.match_advance(Token::VAR)? {
-            self.var_stmt()?;
+            self.var_declaration()?;
         } else {
             self.expression_stmt()?;
         }
-        let mut loop_start = self.vm.instructions.len();
 
+        let mut loop_start = self.vm.instructions.len();
         let mut exit_jump = None;
+
         if !self.match_advance(Token::SEMICOLON)? {
             self.expression()?;
             self.consume(Token::SEMICOLON)?;
@@ -278,26 +233,25 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn var_stmt(&mut self) -> Result<()> {
+    fn var_declaration(&mut self) -> Result<()> {
         let global = self.parse_variable_name()?;
 
-        let curr = &self.input[self.current];
-
-        match curr.ty {
-            Token::EQUAL => {
-                self.advance()?;
-                self.expression()?
-            }
-            _ => self.emit_instruction(OpCode::OP_NULL),
+        if self.match_advance(Token::EQUAL)? {
+            self.expression()?;
+        } else {
+            self.emit_instruction(OpCode::OP_NULL)
         }
+
         self.consume(Token::SEMICOLON)?;
-        match self.scope_depth > 0 {
-            true => {
-                self.mark_initialised();
-            }
+        self.define_variable(global);
+        Ok(())
+    }
+
+    fn define_variable(&mut self, global: u32) {
+        match self.local_manager.scope_depth > 0 {
+            true => self.mark_initialised(),
             false => self.emit_instruction(OpCode::OP_DEFINE_GLOBAL(global)),
         }
-        Ok(())
     }
 
     fn expression(&mut self) -> Result<()> {
@@ -305,13 +259,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn number(&mut self) -> Result<()> {
-        match &self.input[self.current - 1] {
+        match self.get_last() {
             x @ Lexeme {
                 ty: Token::NUMBER, ..
             } => {
-                let bytes = x.find(self.source).as_bytes();
+                let v = x.find(&self.source);
+                let bytes = v.as_bytes();
                 let value = lexical_core::parse::<f64>(bytes).map_err(|_| CompileTimeError {
-                    source_code: self.source.into(),
+                    source_code: self.source.clone(),
                     err_span: x.into(),
                     advice: format!(
                         "could not parse \"{}\" as number!",
@@ -334,7 +289,7 @@ impl<'a> Compiler<'a> {
             ty: Token::STRING,
             symbol,
             ..
-        } = &self.input[self.current - 1]
+        } = self.get_last()
         else {
             unreachable!()
         };
@@ -350,20 +305,20 @@ impl<'a> Compiler<'a> {
     }
 
     fn unary(&mut self) -> Result<()> {
-        let op_ty = &self.input[self.current - 1].ty;
+        let op_ty = self.get_last().ty;
         self.parse_precedence(Precedence::PREC_UNARY)?;
 
         match op_ty {
             Token::MINUS => self.emit_instruction(OpCode::OP_NEGATE),
             Token::BANG => self.emit_instruction(OpCode::OP_NOT),
             _ => unreachable!(),
-        }
+        };
 
         Ok(())
     }
 
     fn binary(&mut self) -> Result<()> {
-        let op_ty = &self.input[self.current - 1].ty;
+        let op_ty = self.get_last().ty;
         let rule = parse_token_to_rule(op_ty);
         self.parse_precedence(rule.2.next_higher())?;
 
@@ -393,13 +348,13 @@ impl<'a> Compiler<'a> {
     }
 
     fn literal(&mut self) -> Result<()> {
-        let last = &self.input[self.current - 1].ty;
+        let last = self.get_last().ty;
         match last {
             Token::FALSE => self.emit_instruction(OpCode::OP_FALSE),
             Token::TRUE => self.emit_instruction(OpCode::OP_TRUE),
             Token::NULL => self.emit_instruction(OpCode::OP_NULL),
             _ => unreachable!(),
-        }
+        };
 
         Ok(())
     }
@@ -420,7 +375,7 @@ impl<'a> Compiler<'a> {
             }
         };
 
-        match &self.input[self.current].ty {
+        match self.get_current().ty {
             Token::EQUAL if can_assign => {
                 self.advance()?;
                 self.expression()?;
@@ -454,14 +409,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve_local(&mut self, name: u32) -> Result<Option<u32>> {
-        for i in (0..self.local_count).rev() {
-            let local = &self.locals[i];
+        for i in (0..self.local_manager.local_count).rev() {
+            let local = &self.local_manager.locals[i];
             if name == local.name {
-                if local.depth.is_none() {
-                    let last = &self.input[self.current - 1];
+                if local.get_depth().is_none() {
+                    let last = self.get_last();
                     return Err(CompileTimeError {
                         advice: "can't read local variable in its own initialiser!".into(),
-                        source_code: self.source.into(),
+                        source_code: self.source.clone(),
                         err_span: last.into(),
                     }
                     .into());
@@ -474,11 +429,11 @@ impl<'a> Compiler<'a> {
 
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
         self.advance()?;
-        let last = &self.input[self.current - 1];
-        let prefix_rule = parse_token_to_rule(&last.ty).0;
+        let last = self.get_last();
+        let prefix_rule = parse_token_to_rule(last.ty).0;
         if matches!(prefix_rule, ParseFn::None) {
             return Err(CompileTimeError {
-                source_code: self.source.into(),
+                source_code: self.source.clone(),
                 err_span: last.into(),
                 advice: "expected an expression!".into(),
             }
@@ -490,24 +445,29 @@ impl<'a> Compiler<'a> {
 
         self.parsefn_tofn(prefix_rule, can_assign)?;
 
-        while v <= parse_token_to_rule(&self.input[self.current].ty).2 as u8 {
+        loop {
+            let curr_rule = parse_token_to_rule(self.get_current().ty);
+            if v > curr_rule.2 as u8 {
+                break;
+            }
             self.advance()?;
-            let last = &self.input[self.current - 1];
-            let infix_rule = parse_token_to_rule(&last.ty).1;
+
+            let infix_rule = curr_rule.1;
             if matches!(infix_rule, ParseFn::None) {
                 return Err(CompileTimeError {
-                    source_code: self.source.into(),
-                    err_span: last.into(),
+                    source_code: self.source.clone(),
+                    err_span: self.get_last().into(),
                     advice: "expected an expression!".into(),
                 }
                 .into());
-            };
+            }
+
             self.parsefn_tofn(infix_rule, can_assign)?;
 
             if can_assign && self.check(Token::EQUAL) {
                 return Err(CompileTimeError {
-                    source_code: self.source.into(),
-                    err_span: last.into(),
+                    source_code: self.source.clone(),
+                    err_span: self.get_last().into(),
                     advice: "this is an invalid assignment target!".into(),
                 }
                 .into());
@@ -520,33 +480,33 @@ impl<'a> Compiler<'a> {
     fn parse_variable_name(&mut self) -> Result<u32> {
         self.consume(Token::IDENTIFIER)?;
         self.declare_variable()?;
-        Ok(match self.scope_depth > 0 {
+        Ok(match self.local_manager.scope_depth > 0 {
             true => 0,
-            false => self.input[self.current - 1].symbol.unwrap().get(),
+            false => self.get_last().symbol.unwrap().get(),
         })
     }
 
     fn mark_initialised(&mut self) {
-        self.locals[self.local_count - 1].depth = NonZero::new(self.scope_depth)
+        self.local_manager.mark_initialised()
     }
 
     fn declare_variable(&mut self) -> Result<()> {
-        if self.scope_depth == 0 {
+        if self.local_manager.scope_depth == 0 {
             return Ok(());
         }
 
         let name = self.get_last_as_interned();
 
-        for local in self.locals.iter().rev() {
-            match local.depth {
-                Some(d) if d.get() < self.scope_depth => break,
+        for local in self.local_manager.locals.iter().rev() {
+            match local.get_depth() {
+                Some(d) if d < self.local_manager.scope_depth => break,
                 Some(_) | None => {
                     if name == local.name {
-                        let last = &self.input[self.current - 1];
+                        let last = self.get_last();
                         return Err(CompileTimeError {
                             advice: "there already exists a variable with this name in this scope."
                                 .into(),
-                            source_code: self.source.into(),
+                            source_code: self.source.clone(),
                             err_span: last.into(),
                         }
                         .into());
@@ -555,44 +515,8 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        self.add_local(name);
+        self.local_manager.add_uninitialised_local(name);
         Ok(())
-    }
-
-    fn add_local(&mut self, name: u32) {
-        self.locals.push(Local { name, depth: None });
-        // local.depth = NonZero::new(self.scope_depth);
-        self.local_count += 1;
-    }
-
-    fn check(&mut self, token: Token) -> bool {
-        let curr = &self.input[self.current];
-        if curr.ty == token {
-            return true;
-        }
-        false
-    }
-
-    fn match_advance(&mut self, token: Token) -> Result<bool> {
-        if self.check(token) {
-            self.consume(token)?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn consume(&mut self, token: Token) -> Result<&Lexeme> {
-        let curr = &self.input[self.current];
-        if curr.ty == token {
-            let _ = self.advance();
-            return Ok(curr);
-        }
-        Err(CompileTimeError {
-            advice: format!("A token of type '{:?}' was not found!", token),
-            source_code: self.source.into(),
-            err_span: curr.into(),
-        }
-        .into())
     }
 
     fn add_constant(&mut self, value: Value) -> usize {
@@ -601,23 +525,27 @@ impl<'a> Compiler<'a> {
 
     fn emit_instruction(&mut self, instruction: OpCode) {
         self.vm
-            .add_instruction(instruction, self.input[self.current - 1].line_n as usize);
+            .add_instruction(instruction, self.get_last().line_n as usize);
     }
 
     fn emit_value(&mut self, value: Value) {
         let v = self.add_constant(value);
-        self.emit_instruction(OpCode::OP_CONSTANT(v as u32));
+        self.emit_instruction(OpCode::OP_CONSTANT(v as u32))
     }
 
     fn begin_scope(&mut self) {
-        self.scope_depth += 1;
+        self.local_manager.begin_scope();
     }
 
     fn end_scope(&mut self) {
-        self.scope_depth -= 1;
-        while self.local_count > 0 {
-            let remove = match self.locals[self.local_count - 1].depth {
-                Some(d) => d.get() > self.scope_depth,
+        self.local_manager.end_scope();
+        while self.local_manager.local_count > 0 {
+            let remove = match self
+                .local_manager
+                .get(self.local_manager.local_count - 1)
+                .get_depth()
+            {
+                Some(d) => d > self.local_manager.scope_depth,
                 None => true,
             };
 
@@ -626,13 +554,12 @@ impl<'a> Compiler<'a> {
             }
 
             self.emit_instruction(OpCode::OP_POP);
-            self.local_count -= 1;
-            self.locals.pop();
+            self.local_manager.pop();
         }
     }
 
     fn get_last_as_interned(&mut self) -> u32 {
-        self.input[self.current - 1].symbol.unwrap().get()
+        self.get_last().symbol.unwrap().get()
     }
 
     fn emit_jump(&mut self, instruction: OpCode) -> usize {
@@ -651,6 +578,6 @@ impl<'a> Compiler<'a> {
 
     fn emit_loop(&mut self, loop_start: usize) {
         let off_set = self.vm.instructions.len() + 1 - loop_start;
-        self.emit_instruction(OpCode::OP_LOOP(off_set as u32));
+        self.emit_instruction(OpCode::OP_LOOP(off_set as u32))
     }
 }
