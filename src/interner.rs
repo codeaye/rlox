@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 pub struct Interner {
     source: Arc<str>,
     ids: Vec<Range<usize>>,
-    map: FxHashMap<&'static str, u32>,
+    map: FxHashMap<&'static str, u16>,
 }
 impl Interner {
     pub fn new(source: Arc<str>) -> Self {
@@ -17,21 +17,22 @@ impl Interner {
         }
     }
 
-    pub fn intern(&mut self, range: Range<usize>) -> u32 {
+    pub fn intern(&mut self, range: Range<usize>) -> u16 {
         let slice = &self.source[range.clone()];
         let slice_static: &'static str = unsafe { std::mem::transmute(slice) };
 
         if let Some(&id) = self.map.get(slice_static) {
             id
         } else {
-            let id = self.ids.len() as u32;
+            let id = self.ids.len() as u16;
             self.ids.push(range);
             self.map.insert(slice_static, id);
             id
         }
     }
 
-    pub fn resolve(&self, id: u32) -> &str {
+    #[inline(always)]
+    pub fn resolve(&self, id: u16) -> &str {
         let range = &self.ids[(id - 1) as usize];
         &self.source[range.clone()]
     }

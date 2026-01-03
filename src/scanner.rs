@@ -5,7 +5,7 @@ use miette::Result;
 use crate::{
     errors::CompileTimeError,
     interner::Interner,
-    typedef::{Lexeme, Token, ZeroOptU32},
+    typedef::{Lexeme, Token, ZeroOptU16},
 };
 
 #[derive(Default, Debug)]
@@ -90,7 +90,7 @@ impl<'a> Scanner<'a> {
             self.line,
             self.cursor.start,
             self.cursor.end,
-            ZeroOptU32::none(),
+            ZeroOptU16::none(),
         )))
     }
 
@@ -101,7 +101,7 @@ impl<'a> Scanner<'a> {
             self.line,
             self.cursor.start,
             self.cursor.end,
-            ZeroOptU32::new(self.interner.intern(self.cursor.start..self.cursor.end)),
+            ZeroOptU16::new(self.interner.intern(self.cursor.start..self.cursor.end)),
         )))
     }
 
@@ -252,7 +252,7 @@ impl<'a> Iterator for Scanner<'a> {
                         self.line,
                         self.cursor.start,
                         self.cursor.end,
-                        ZeroOptU32::new(
+                        ZeroOptU16::new(
                             self.interner
                                 .intern(self.cursor.start + 1..self.cursor.end - 1),
                         ),

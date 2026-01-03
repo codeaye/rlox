@@ -6,23 +6,23 @@ use crate::vm::Value;
 #[derive(Clone, Debug)]
 pub struct Arena {
     pub strings: Vec<String>,
-    pub globals: FxHashMap<u32, Value>,
+    pub globals: FxHashMap<u16, Value>,
 }
 
 impl Arena {
     pub fn new() -> Self {
         Self {
             globals: FxHashMap::default(),
-            strings: Vec::with_capacity(256),
+            strings: Vec::with_capacity(128),
         }
     }
 
-    pub fn alloc_string(&mut self, obj: String) -> u32 {
+    pub fn alloc_string(&mut self, obj: String) -> u16 {
         self.strings.push(obj);
-        (self.strings.len() - 1) as u32
+        (self.strings.len() - 1) as u16
     }
 
-    pub fn get_string(&self, id: u32) -> &str {
+    pub fn get_string(&self, id: u16) -> &str {
         &self.strings[id as usize]
     }
 }

@@ -1,7 +1,7 @@
 use crate::{
     errors::CompileTimeError,
     scanner::Scanner,
-    typedef::{Lexeme, ParseFn, Precedence, ScopeManager, Token, ZeroOptU32, parse_token_to_rule},
+    typedef::{Lexeme, ParseFn, Precedence, ScopeManager, Token, ZeroOptU16, parse_token_to_rule},
     vm::{OpCode, VM, Value},
 };
 use miette::Result;
@@ -152,7 +152,7 @@ impl<'a> Compiler<'a> {
     fn print_stmt(&mut self) -> Result<()> {
         self.expression()?;
         self.consume(Token::SEMICOLON)?;
-        self.emit_instruction(OpCode::OP_PRINT);
+        self.write_instruction(OpCode::OP_PRINT);
         Ok(())
     }
 
@@ -161,14 +161,14 @@ impl<'a> Compiler<'a> {
         self.expression()?;
         self.consume(Token::RIGHT_PAREN)?;
 
-        let then_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
-        self.emit_instruction(OpCode::OP_POP);
+        let then_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE);
+        self.write_instruction(OpCode::OP_POP);
         self.statement()?;
 
-        let else_jump = self.emit_jump(OpCode::OP_JUMP(0));
+        let else_jump = self.emit_jump(OpCode::OP_JUMP);
 
         self.patch_jump(then_jump);
-        self.emit_instruction(OpCode::OP_POP);
+        self.write_instruction(OpCode::OP_POP);
         if self.match_advance(Token::ELSE)? {
             self.statement()?;
         }
@@ -178,16 +178,16 @@ impl<'a> Compiler<'a> {
     }
 
     fn while_stmt(&mut self) -> Result<()> {
-        let loop_start = self.vm.instructions.len();
+        let loop_start = self.vm.chunk.len();
         self.consume(Token::LEFT_PAREN)?;
         self.expression()?;
         self.consume(Token::RIGHT_PAREN)?;
-        let exit_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
-        self.emit_instruction(OpCode::OP_POP);
+        let exit_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE);
+        self.write_instruction(OpCode::OP_POP);
         self.statement()?;
         self.emit_loop(loop_start);
         self.patch_jump(exit_jump);
-        self.emit_instruction(OpCode::OP_POP);
+        self.write_instruction(OpCode::OP_POP);
         Ok(())
     }
 
@@ -201,22 +201,22 @@ impl<'a> Compiler<'a> {
             self.expression_stmt()?;
         }
 
-        let mut loop_start = self.vm.instructions.len();
+        let mut loop_start = self.vm.chunk.len();
         let mut exit_jump = None;
 
         if !self.match_advance(Token::SEMICOLON)? {
             self.expression()?;
             self.consume(Token::SEMICOLON)?;
 
-            exit_jump = Some(self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0)));
-            self.emit_instruction(OpCode::OP_POP);
+            exit_jump = Some(self.emit_jump(OpCode::OP_JUMP_IF_FALSE));
+            self.write_instruction(OpCode::OP_POP);
         }
 
         if !self.match_advance(Token::RIGHT_PAREN)? {
-            let body_jump = self.emit_jump(OpCode::OP_JUMP(0));
-            let inc_start = self.vm.instructions.len();
+            let body_jump = self.emit_jump(OpCode::OP_JUMP);
+            let inc_start = self.vm.chunk.len();
             self.expression()?;
-            self.emit_instruction(OpCode::OP_POP);
+            self.write_instruction(OpCode::OP_POP);
             self.consume(Token::RIGHT_PAREN)?;
             self.emit_loop(loop_start);
             loop_start = inc_start;
@@ -226,7 +226,7 @@ impl<'a> Compiler<'a> {
         self.emit_loop(loop_start);
         if let Some(v) = exit_jump {
             self.patch_jump(v);
-            self.emit_instruction(OpCode::OP_POP);
+            self.write_instruction(OpCode::OP_POP);
         }
         self.end_scope();
 
@@ -236,7 +236,7 @@ impl<'a> Compiler<'a> {
     fn expression_stmt(&mut self) -> Result<()> {
         self.expression()?;
         self.consume(Token::SEMICOLON)?;
-        self.emit_instruction(OpCode::OP_POP);
+        self.write_instruction(OpCode::OP_POP);
         Ok(())
     }
 
@@ -246,7 +246,7 @@ impl<'a> Compiler<'a> {
         if self.match_advance(Token::EQUAL)? {
             self.expression()?;
         } else {
-            self.emit_instruction(OpCode::OP_NULL)
+            self.write_instruction(OpCode::OP_NULL)
         }
 
         self.consume(Token::SEMICOLON)?;
@@ -254,10 +254,13 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn define_variable(&mut self, global: u32) {
+    fn define_variable(&mut self, global: u16) {
         match self.local_manager.scope_depth > 0 {
             true => self.mark_initialised(),
-            false => self.emit_instruction(OpCode::OP_DEFINE_GLOBAL(global)),
+            false => {
+                self.write_instruction(OpCode::OP_DEFINE_GLOBAL);
+                self.write_value(global);
+            }
         }
     }
 
@@ -272,7 +275,7 @@ impl<'a> Compiler<'a> {
             } => {
                 let v = x.find(&self.source);
                 let bytes = v.as_bytes();
-                let value = lexical_core::parse::<f64>(bytes).map_err(|_| CompileTimeError {
+                let value = lexical_core::parse::<f32>(bytes).map_err(|_| CompileTimeError {
                     source_code: self.source.clone(),
                     err_span: x.into(),
                     advice: format!(
@@ -316,8 +319,8 @@ impl<'a> Compiler<'a> {
         self.parse_precedence(Precedence::PREC_UNARY)?;
 
         match op_ty {
-            Token::MINUS => self.emit_instruction(OpCode::OP_NEGATE),
-            Token::BANG => self.emit_instruction(OpCode::OP_NOT),
+            Token::MINUS => self.write_instruction(OpCode::OP_NEGATE),
+            Token::BANG => self.write_instruction(OpCode::OP_NOT),
             _ => unreachable!(),
         };
 
@@ -332,7 +335,7 @@ impl<'a> Compiler<'a> {
         macro_rules! emit_binop {
             ($self:expr, $op:expr, {$($token:ident => $opcode:ident),+ $(,)?}) => {
             match $op {
-                $($token => $self.emit_instruction($opcode),)+
+                $($token => $self.write_instruction($opcode),)+
                 _ => unreachable!(),}
             };
         }
@@ -357,9 +360,9 @@ impl<'a> Compiler<'a> {
     fn literal(&mut self) -> Result<()> {
         let last = self.get_last().ty;
         match last {
-            Token::FALSE => self.emit_instruction(OpCode::OP_FALSE),
-            Token::TRUE => self.emit_instruction(OpCode::OP_TRUE),
-            Token::NULL => self.emit_instruction(OpCode::OP_NULL),
+            Token::FALSE => self.write_instruction(OpCode::OP_FALSE),
+            Token::TRUE => self.write_instruction(OpCode::OP_TRUE),
+            Token::NULL => self.write_instruction(OpCode::OP_NULL),
             _ => unreachable!(),
         };
 
@@ -368,17 +371,19 @@ impl<'a> Compiler<'a> {
 
     fn variable(&mut self, can_assign: bool) -> Result<()> {
         let name = self.get_last_as_interned();
-
         let arg = self.resolve_local(name)?;
         let (get_op, set_op);
+        let val;
         match arg.get() {
             None => {
-                get_op = OpCode::OP_GET_GLOBAL(name);
-                set_op = OpCode::OP_SET_GLOBAL(name)
+                val = name;
+                get_op = OpCode::OP_GET_GLOBAL;
+                set_op = OpCode::OP_SET_GLOBAL
             }
             Some(u) => {
-                get_op = OpCode::OP_GET_LOCAL(u);
-                set_op = OpCode::OP_SET_LOCAL(u)
+                val = u;
+                get_op = OpCode::OP_GET_LOCAL;
+                set_op = OpCode::OP_SET_LOCAL
             }
         };
 
@@ -386,10 +391,13 @@ impl<'a> Compiler<'a> {
             Token::EQUAL if can_assign => {
                 self.advance()?;
                 self.expression()?;
-                self.emit_instruction(set_op);
+                self.write_instruction(set_op);
+
+                self.write_value(val);
             }
             _ => {
-                self.emit_instruction(get_op);
+                self.write_instruction(get_op);
+                self.write_value(val);
             }
         }
 
@@ -397,25 +405,25 @@ impl<'a> Compiler<'a> {
     }
 
     fn and(&mut self) -> Result<()> {
-        let end_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
-        self.emit_instruction(OpCode::OP_POP);
+        let end_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE);
+        self.write_instruction(OpCode::OP_POP);
         self.parse_precedence(Precedence::PREC_AND)?;
         self.patch_jump(end_jump);
         Ok(())
     }
 
     fn or(&mut self) -> Result<()> {
-        let else_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE(0));
-        let end_jump = self.emit_jump(OpCode::OP_JUMP(0));
+        let else_jump = self.emit_jump(OpCode::OP_JUMP_IF_FALSE);
+        let end_jump = self.emit_jump(OpCode::OP_JUMP);
 
         self.patch_jump(else_jump);
-        self.emit_instruction(OpCode::OP_POP);
+        self.write_instruction(OpCode::OP_POP);
         self.parse_precedence(Precedence::PREC_OR)?;
         self.patch_jump(end_jump);
         Ok(())
     }
 
-    fn resolve_local(&mut self, name: u32) -> Result<ZeroOptU32> {
+    fn resolve_local(&mut self, name: u16) -> Result<ZeroOptU16> {
         for i in (0..self.local_manager.local_count).rev() {
             let local = &self.local_manager.locals[i];
             if name == local.name {
@@ -428,10 +436,10 @@ impl<'a> Compiler<'a> {
                     }
                     .into());
                 }
-                return Ok(ZeroOptU32::new(i as u32));
+                return Ok(ZeroOptU16::new(i as u16));
             }
         }
-        Ok(ZeroOptU32::none())
+        Ok(ZeroOptU16::none())
     }
 
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
@@ -484,7 +492,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn parse_variable_name(&mut self) -> Result<u32> {
+    fn parse_variable_name(&mut self) -> Result<u16> {
         self.consume(Token::IDENTIFIER)?;
         self.declare_variable()?;
         Ok(match self.local_manager.scope_depth > 0 {
@@ -533,15 +541,21 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline(always)]
-    fn emit_instruction(&mut self, instruction: OpCode) {
+    fn write_instruction(&mut self, instruction: OpCode) {
         self.vm
-            .add_instruction(instruction, self.get_last().line_n as usize);
+            .write_instruction(instruction, self.get_last().line_n as usize);
+    }
+
+    #[inline(always)]
+    pub fn write_value(&mut self, value: u16) {
+        self.vm.write_value(value, self.get_last().line_n as usize);
     }
 
     #[inline(always)]
     fn emit_value(&mut self, value: Value) {
         let v = self.add_constant(value);
-        self.emit_instruction(OpCode::OP_CONSTANT(v as u32))
+        self.write_instruction(OpCode::OP_CONSTANT);
+        self.write_value(v as u16);
     }
 
     #[inline(always)]
@@ -565,34 +579,38 @@ impl<'a> Compiler<'a> {
                 break;
             }
 
-            self.emit_instruction(OpCode::OP_POP);
+            self.write_instruction(OpCode::OP_POP);
             self.local_manager.pop();
         }
     }
 
     #[inline(always)]
-    fn get_last_as_interned(&mut self) -> u32 {
+    fn get_last_as_interned(&mut self) -> u16 {
         self.get_last().symbol.unwrap()
     }
 
     #[inline(always)]
     fn emit_jump(&mut self, instruction: OpCode) -> usize {
-        self.emit_instruction(instruction);
-        self.vm.instructions.len() - 1
+        self.write_instruction(instruction);
+        let inst = self.vm.chunk.len();
+        self.write_value(0);
+        inst
     }
 
     fn patch_jump(&mut self, offset: usize) {
-        let jump = self.vm.instructions.len() - 1 - offset;
-        self.vm.instructions[offset] = match self.vm.instructions[offset] {
-            OpCode::OP_JUMP_IF_FALSE(_) => OpCode::OP_JUMP_IF_FALSE(jump as u32),
-            OpCode::OP_JUMP(_) => OpCode::OP_JUMP(jump as u32),
-            _ => unreachable!(),
-        }
+        let jump = self.vm.chunk.len() - (offset + 2);
+        let jump_u16: u16 = jump.try_into().expect("jump offset exceeds u16");
+        let bytes = jump_u16.to_le_bytes();
+
+        self.vm.chunk.set(offset, bytes[0]);
+        self.vm.chunk.set(offset + 1, bytes[1]);
     }
 
     #[inline(always)]
     fn emit_loop(&mut self, loop_start: usize) {
-        let off_set = self.vm.instructions.len() + 1 - loop_start;
-        self.emit_instruction(OpCode::OP_LOOP(off_set as u32))
+        self.write_instruction(OpCode::OP_LOOP);
+        let offset = self.vm.chunk.len() + 2 - loop_start;
+        let offset_u16 = offset.try_into().expect("loop offset exceeds u16");
+        self.write_value(offset_u16);
     }
 }

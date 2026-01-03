@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, ops::Range};
+use std::{num::NonZeroU16, ops::Range};
 
 use miette::SourceSpan;
 
@@ -36,11 +36,11 @@ pub struct Lexeme {
     pub line_n: u32,
     pub start: u32,
     pub len: u16,
-    pub symbol: ZeroOptU32,
+    pub symbol: ZeroOptU16,
 }
 
 impl Lexeme {
-    pub fn new(ty: Token, line_n: u32, start: usize, end: usize, symbol: ZeroOptU32) -> Self {
+    pub fn new(ty: Token, line_n: u32, start: usize, end: usize, symbol: ZeroOptU16) -> Self {
         Self {
             ty,
             line_n,
@@ -102,18 +102,18 @@ impl Precedence {
 
 #[derive(Debug)]
 pub struct Local {
-    pub(crate) name: u32,
-    depth: ZeroOptU32,
+    pub(crate) name: u16,
+    depth: ZeroOptU16,
 }
 
 impl Local {
     #[inline(always)]
-    pub fn get_depth(&self) -> Option<u32> {
+    pub fn get_depth(&self) -> Option<u16> {
         self.depth.get()
     }
     #[inline(always)]
-    pub fn set_depth(&mut self, val: u32) {
-        self.depth = ZeroOptU32::new(val);
+    pub fn set_depth(&mut self, val: u16) {
+        self.depth = ZeroOptU16::new(val);
     }
 }
 
@@ -121,22 +121,25 @@ impl Local {
 pub struct ScopeManager {
     pub(crate) locals: Vec<Local>,
     pub local_count: usize,
-    pub scope_depth: u32,
+    pub scope_depth: u16,
 }
 
 impl ScopeManager {
+    #[inline(always)]
     pub fn new() -> Self {
         ScopeManager {
             ..Default::default()
         }
     }
 
+    #[inline(always)]
     pub fn get(&self, i: usize) -> &Local {
         self.locals
             .get(i)
             .expect("attempted to get uninitialised local")
     }
 
+    #[inline(always)]
     pub fn mark_initialised(&mut self) {
         if self.scope_depth == 0 {
             return;
@@ -147,23 +150,27 @@ impl ScopeManager {
             .set_depth(self.scope_depth);
     }
 
-    pub fn add_uninitialised_local(&mut self, name: u32) {
+    #[inline(always)]
+    pub fn add_uninitialised_local(&mut self, name: u16) {
         self.locals.push(Local {
             name,
-            depth: ZeroOptU32::none(),
+            depth: ZeroOptU16::none(),
         });
         self.local_count += 1;
     }
 
+    #[inline(always)]
     pub fn pop(&mut self) {
         self.locals.pop();
         self.local_count -= 1;
     }
 
+    #[inline(always)]
     pub fn begin_scope(&mut self) {
         self.scope_depth += 1;
     }
 
+    #[inline(always)]
     pub fn end_scope(&mut self) {
         self.scope_depth -= 1;
     }
@@ -210,15 +217,15 @@ pub fn parse_token_to_rule(token: Token) -> ParseRule {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(transparent)]
-pub struct ZeroOptU32(Option<NonZeroU32>);
+pub struct ZeroOptU16(Option<NonZeroU16>);
 
-impl ZeroOptU32 {
+impl ZeroOptU16 {
     #[inline(always)]
-    pub fn new(value: u32) -> Self {
-        if value == u32::MAX {
-            panic!("value too large for ZeroOptU32");
+    pub fn new(value: u16) -> Self {
+        if value == u16::MAX {
+            panic!("value too large for ZeroOptU16");
         }
-        Self(Some(NonZeroU32::new(value + 1).unwrap()))
+        Self(Some(NonZeroU16::new(value + 1).unwrap()))
     }
 
     #[inline(always)]
@@ -237,25 +244,90 @@ impl ZeroOptU32 {
     }
 
     #[inline(always)]
-    pub fn get(&self) -> Option<u32> {
+    pub fn get(&self) -> Option<u16> {
         self.0.map(|nz| nz.get() - 1)
     }
 
     #[inline(always)]
-    pub fn unwrap(&self) -> u32 {
-        self.get().expect("ZeroOptU32 is None")
+    pub fn unwrap(&self) -> u16 {
+        self.get().expect("ZeroOptU16 is None")
     }
 
     #[inline(always)]
-    pub fn set(&mut self, value: u32) {
-        if value == u32::MAX {
-            panic!("value too large for ZeroOptU32");
+    pub fn set(&mut self, value: u16) {
+        if value == u16::MAX {
+            panic!("value too large for ZeroOptU16");
         }
-        self.0 = Some(NonZeroU32::new(value + 1).unwrap());
+        self.0 = Some(NonZeroU16::new(value + 1).unwrap());
     }
 
     #[inline(always)]
     pub fn clear(&mut self) {
         self.0 = None;
+    }
+}
+
+#[derive(Debug)]
+pub struct Chunk {
+    bytes: Vec<u8>,
+    ip: usize,
+}
+
+impl Chunk {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+            ip: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn inc_ip(&mut self, inc: usize) {
+        self.ip += inc
+    }
+
+    #[inline(always)]
+    pub fn dec_ip(&mut self, inc: usize) {
+        self.ip -= inc
+    }
+
+    #[inline(always)]
+    pub fn get_byte_at_depth(&self, offset: usize) -> u8 {
+        self.bytes[self.ip - offset]
+    }
+
+    #[inline(always)]
+    pub fn get_previous(&self) -> u8 {
+        self.bytes[self.ip - 1]
+    }
+
+    #[inline(always)]
+    pub fn get_ip(&self) -> usize {
+        self.ip
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    #[inline(always)]
+    pub fn set(&mut self, id: usize, value: u8) {
+        self.bytes[id] = value;
+    }
+
+    #[inline(always)]
+    pub fn extend_from_slice(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+
+    #[inline(always)]
+    pub fn is_at_end(&self) -> bool {
+        self.ip >= self.bytes.len()
     }
 }
